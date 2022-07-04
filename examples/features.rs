@@ -1,8 +1,8 @@
 #![feature(arbitrary_self_types)]
 
-use shifgrethor::{Gc, GcStore};
+use elise::{Gc, GcStore};
 
-#[derive(shifgrethor::GC)]
+#[derive(elise::GC)]
 #[gc(finalize)]
 struct Foo<'root> {
     #[gc]
@@ -37,7 +37,7 @@ impl<'root> Foo<'root> {
     }
 }
 
-impl<'root> shifgrethor::Finalize for Foo<'root> {
+impl<'root> elise::Finalize for Foo<'root> {
     fn finalize(&mut self) {
         println!("{}", self.local);
     }
@@ -45,14 +45,14 @@ impl<'root> shifgrethor::Finalize for Foo<'root> {
 
 fn main() {
     {
-        shifgrethor::letroot!(root);
+        elise::letroot!(root);
 
         let foo = root.gc(Foo::new());
 
-        shifgrethor::collect();
+        elise::collect();
 
         foo.print_nonlocal();
     }
 
-    shifgrethor::collect();
+    elise::collect();
 }

@@ -1,27 +1,28 @@
 [package]
-name = "shifgrethor"
+name = "elise"
 version = "0.1.0"
-edition = "2018"
-authors = ["Without Boats <boats@mozilla.com>"]
+edition = "2021"
+description = "A concurrent GC."
+license = "Apache-2.0 OR MIT"
 
 [dependencies]
 pin-cell = "0.1.1"
 
 [dependencies.derive]
-path = "src/lib/derive"
+path = "crates/derive"
 version = "0.1.0"
-package = "shifgrethor-derive"
+package = "elise-derive"
 
 [dependencies.gc]
-path = "src/lib/gc"
+path = "crates/gc"
 version = "0.1.0"
-package = "shifgrethor-gc"
+package = "elise-gc"
 
 [dev-dependencies]
 env_logger = "0.5.13"
 
 [workspace]
 members = [
-    "src/lib/derive",
-    "src/lib/gc",
+    "crates/derive",
+    "crates/gc",
 ]

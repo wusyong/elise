@@ -1,6 +1,6 @@
 #![feature(arbitrary_self_types)]
 
-use shifgrethor::{GcStore, GC};
+use elise::{GcStore, GC};
 
 use pin_cell::PinCell;
 use std::cell::RefCell;
@@ -20,7 +20,7 @@ enum Null {
 }
 
 fn main() {
-    shifgrethor::letroot!(root);
+    elise::letroot!(root);
     let foo = root.gc(Foo {
         null: RefCell::new(Null::A(0)),
         traced: PinCell::new(GcStore::new(0)),

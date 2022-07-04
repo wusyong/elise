@@ -22,9 +22,9 @@ pub fn accessors(s: &Structure, gcs: &[&BindingInfo]) -> TokenStream {
         let ty: &Type = &b_ast.ty;
 
         quote! {
-            #visibility fn #method<'__root>(self: &'__root shifgrethor::Gc<'__root, Self>) -> <#ty as shifgrethor::raw::Store<'__root>>::Accessor {
+            #visibility fn #method<'__root>(self: &'__root elise::Gc<'__root, Self>) -> <#ty as elise::raw::Store<'__root>>::Accessor {
                 unsafe {
-                    shifgrethor::raw::Store::rooted(&self.#field)
+                    elise::raw::Store::rooted(&self.#field)
                 }
             }
         }

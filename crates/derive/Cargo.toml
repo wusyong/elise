@@ -1,8 +1,9 @@
 [package]
-name = "shifgrethor-derive"
-edition = "2018"
+name = "elise-derive"
+edition = "2021"
 version = "0.1.0"
-authors = ["Without Boats <boats@mozilla.com>"]
+description = "Macros of Für Elise"
+license = "Apache-2.0 OR MIT"
 
 [dependencies]
 quote = "0.6.8"

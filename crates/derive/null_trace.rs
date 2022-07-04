@@ -13,14 +13,14 @@ pub fn null_trace_impl(s: &Structure) -> TokenStream {
         .map(|b| {
             let ty = &b.ast().ty;
             quote! {
-                #ty: shifgrethor::raw::NullTrace
+                #ty: elise::raw::NullTrace
             }
         });
 
     s.gen_impl(quote! {
-        extern crate shifgrethor;
+        extern crate elise;
 
-        gen unsafe impl shifgrethor::raw::NullTrace for @Self where
+        gen unsafe impl elise::raw::NullTrace for @Self where
             #(#bounds,)*
         { }
     })

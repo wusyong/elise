@@ -2,7 +2,7 @@
 
 use std::borrow::Borrow;
 
-use shifgrethor::{letroot, Finalize, Gc, GcStore, HeapRoot, GC};
+use elise::{letroot, Finalize, Gc, GcStore, HeapRoot, GC};
 
 #[derive(GC)]
 #[gc(finalize)]
@@ -54,8 +54,8 @@ fn main() {
         let root = HeapRoot::new(foo);
         // letroot!(root);
         let foo = root.gc();
-        shifgrethor::collect();
+        elise::collect();
         println!("{}", foo.gc_method(2));
     }
-    shifgrethor::collect();
+    elise::collect();
 }

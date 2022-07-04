@@ -1,8 +1,9 @@
 [package]
-name = "shifgrethor-gc"
-edition = "2018"
+name = "elise-gc"
+edition = "2021"
 version = "0.1.0"
-authors = ["Without Boats <boats@mozilla.com>"]
+description = "Raw GC of Für Elise"
+license = "Apache-2.0 OR MIT"
 
 [lib]
 path = "lib.rs"

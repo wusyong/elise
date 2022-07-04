@@ -42,9 +42,9 @@ fn gc_derive(s: synstructure::Structure) -> TokenStream {
 
 fn gc_impl(s: &synstructure::Structure) -> TokenStream {
     s.gen_impl(quote! {
-        extern crate shifgrethor;
+        extern crate elise;
 
-        gen impl<'__root> shifgrethor::GC<'__root> for @Self {
+        gen impl<'__root> elise::GC<'__root> for @Self {
         }
     })
 }

@@ -59,9 +59,9 @@ reroot_simple!(
     std::fs::FileType
     std::fs::Metadata
     std::fs::OpenOptions
-    std::io::BufRead
-    std::io::Read
-    std::io::Write
+    dyn std::io::BufRead
+    dyn std::io::Read
+    dyn std::io::Write
     std::io::Stdin
     std::io::Stdout
     std::io::Stderr

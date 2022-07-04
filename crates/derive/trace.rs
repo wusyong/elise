@@ -18,7 +18,7 @@ pub fn trace_impl(s: &Structure) -> TokenStream {
     let drop = has_drop(s);
     let drop_glue = match &drop {
         HasDrop::None => quote!(),
-        _ => quote!(shifgrethor::Finalize::finalize(self)),
+        _ => quote!(elise::Finalize::finalize(self)),
     };
     let bound = match &drop {
         HasDrop::Drop => {
@@ -26,14 +26,14 @@ pub fn trace_impl(s: &Structure) -> TokenStream {
                 only_has_root_lifetime(s),
                 "GC'd objects with lifetimes other than 'root must use UnsafeFinalize"
             );
-            quote! { for<'__root> Self: shifgrethor::raw::Reroot<'__root> }
+            quote! { for<'__root> Self: elise::raw::Reroot<'__root> }
         }
         _ => quote! {},
     };
     s.gen_impl(quote! {
-        extern crate shifgrethor;
+        extern crate elise;
 
-        gen unsafe impl shifgrethor::raw::Trace for @Self where
+        gen unsafe impl elise::raw::Trace for @Self where
             #bound
         {
             unsafe fn mark(&self) {
