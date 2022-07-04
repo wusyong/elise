@@ -1,7 +1,7 @@
 use std::cell;
 use std::mem;
 
-use gc::{GcPtr, Trace, NullTrace};
+use gc::{GcPtr, NullTrace, Trace};
 
 use crate::{Gc, GcStore};
 
@@ -9,7 +9,8 @@ pub unsafe trait Reroot<'root> {
     type Rerooted: ?Sized + 'root;
 }
 
-pub unsafe fn reroot<'root, T>(data: GcPtr<T>) -> GcPtr<T::Rerooted> where
+pub unsafe fn reroot<'root, T>(data: GcPtr<T>) -> GcPtr<T::Rerooted>
+where
     T: Reroot<'root> + ?Sized,
     T::Rerooted: Trace,
 {
@@ -103,7 +104,6 @@ reroot_arrays! {
     0o20, 0o21, 0o22, 0o23, 0o24, 0o25, 0o26, 0o27,
     0o30, 0o31, 0o32, 0o33, 0o34, 0o35, 0o36, 0o37
 }
-
 
 macro_rules! reroot_tuples {
     ($(($($T:ident),*))*) => {$(

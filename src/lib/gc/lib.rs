@@ -3,8 +3,8 @@ mod alloc;
 mod gc_ptr;
 mod list;
 mod root;
-mod trace;
 mod state;
+mod trace;
 
 use std::pin::Pin;
 
@@ -14,7 +14,7 @@ use crate::state::GcState;
 
 pub use crate::gc_ptr::GcPtr;
 pub use crate::root::Root;
-pub use crate::trace::{Trace, NullTrace};
+pub use crate::trace::{NullTrace, Trace};
 
 static GC: Lazy<GcState> = Lazy::new(|| GcState::default());
 // thread_local! {
@@ -29,7 +29,9 @@ pub fn alloc_unmanaged<T: Trace>(data: T) -> GcPtr<T> {
 /// Allocate a managed GcPtr
 pub fn alloc<T: Trace>(data: T) -> GcPtr<T> {
     let gc_ptr = alloc_unmanaged(data);
-    unsafe { manage(gc_ptr); }
+    unsafe {
+        manage(gc_ptr);
+    }
     gc_ptr
 }
 

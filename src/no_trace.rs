@@ -9,21 +9,20 @@ pub struct NoTrace<T: ?Sized> {
 
 impl<T> NoTrace<T> {
     pub unsafe fn new_unchecked(data: T) -> NoTrace<T> {
-        NoTrace { data } 
+        NoTrace { data }
     }
 }
 
 impl<T: 'static> NoTrace<T> {
     pub fn new_static(data: T) -> NoTrace<T> {
-        NoTrace { data } 
+        NoTrace { data }
     }
 }
 
 impl<T: Copy> NoTrace<T> {
     pub fn new_copy(data: T) -> NoTrace<T> {
-        NoTrace { data } 
+        NoTrace { data }
     }
-
 }
 
 impl<T: ?Sized> Deref for NoTrace<T> {
@@ -41,7 +40,7 @@ impl<T: ?Sized> DerefMut for NoTrace<T> {
 }
 
 unsafe impl<T: ?Sized> Trace for NoTrace<T> {
-    unsafe fn mark(&self) { }
-    unsafe fn manage(&self) { }
-    unsafe fn finalize(&mut self) { }
+    unsafe fn mark(&self) {}
+    unsafe fn manage(&self) {}
+    unsafe fn finalize(&mut self) {}
 }

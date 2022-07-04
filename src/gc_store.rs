@@ -61,7 +61,7 @@ unsafe impl<'root, T: Trace + ?Sized> Trace for GcStore<'root, T> {
         self.ptr.manage();
     }
 
-    unsafe fn finalize(&mut self) { }
+    unsafe fn finalize(&mut self) {}
 }
 
 impl<'root, T: ?Sized + Trace> From<Gc<'root, T>> for GcStore<'root, T> {
@@ -82,4 +82,3 @@ impl<'root, T: ?Sized> Drop for GcStore<'root, T> {
         }
     }
 }
-

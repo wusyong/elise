@@ -1,6 +1,6 @@
+use proc_macro2::*;
 use syn::*;
 use synstructure::*;
-use proc_macro2::*;
 
 pub fn accessors(s: &Structure, gcs: &[&BindingInfo]) -> TokenStream {
     let s_ast: &DeriveInput = s.ast();
@@ -11,7 +11,6 @@ pub fn accessors(s: &Structure, gcs: &[&BindingInfo]) -> TokenStream {
     if gcs.len() > 0 && s.variants().len() != 1 {
         panic!("gc_accessor attributes can only be used on structs");
     }
-
 
     let accessors: TokenStream = gcs.iter().map(|b| {
         let b_ast: &Field = b.ast();

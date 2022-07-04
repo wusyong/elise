@@ -23,9 +23,8 @@ macro_rules! transmute_store {
     )*}
 }
 
-
-use std::collections::*;
 use pin_cell::PinCell;
+use std::collections::*;
 
 transmute_store! {
     for<T> Box<GcStore<'r, T>> => Box<Gc<'root, T>>;

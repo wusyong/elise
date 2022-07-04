@@ -1,19 +1,23 @@
 #![feature(arbitrary_self_types)]
 
-use shifgrethor::{GC, GcStore};
+use shifgrethor::{GcStore, GC};
 
-use std::cell::RefCell;
 use pin_cell::PinCell;
+use std::cell::RefCell;
 
 #[derive(GC)]
 struct Foo<'root> {
     null: RefCell<Null>,
-    #[gc] traced: PinCell<GcStore<'root, i32>>,
+    #[gc]
+    traced: PinCell<GcStore<'root, i32>>,
 }
 
 #[derive(GC)]
 #[gc(null_trace)]
-enum Null { A(i32), B(String) }
+enum Null {
+    A(i32),
+    B(String),
+}
 
 fn main() {
     shifgrethor::letroot!(root);

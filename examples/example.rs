@@ -1,12 +1,15 @@
 #![feature(arbitrary_self_types)]
 
-use shifgrethor::{Gc, GcStore, letroot, GC, Finalize};
+use std::borrow::Borrow;
+
+use shifgrethor::{letroot, Finalize, Gc, GcStore, HeapRoot, GC};
 
 #[derive(GC)]
 #[gc(finalize)]
 struct Foo<'root> {
     int: u64,
-    #[gc] bar: GcStore<'root, Bar<'root>>,
+    #[gc]
+    bar: GcStore<'root, Bar<'root>>,
 }
 
 impl<'root> Foo<'root> {
@@ -33,7 +36,8 @@ impl<'root> Finalize for Foo<'root> {
 
 #[derive(GC)]
 struct Bar<'root> {
-    #[gc] data: GcStore<'root, String>,
+    #[gc]
+    data: GcStore<'root, String>,
 }
 
 impl<'root> Bar<'root> {
@@ -47,8 +51,9 @@ impl<'root> Bar<'root> {
 fn main() {
     {
         let foo = Foo::new(2, String::from("Hello, world!"));
-        letroot!(root);
-        let foo = root.gc(foo);
+        let root = HeapRoot::new(foo);
+        // letroot!(root);
+        let foo = root.gc();
         shifgrethor::collect();
         println!("{}", foo.gc_method(2));
     }

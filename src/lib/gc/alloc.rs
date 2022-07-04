@@ -8,7 +8,7 @@ use log::*;
 use crate::list::List;
 use crate::trace::Trace;
 
-extern {
+extern "C" {
     pub type Data;
     type Vtable;
 }
@@ -36,9 +36,7 @@ impl<T: Trace> Allocation<T> {
             },
             data,
         });
-        unsafe {
-            Ptr(NonNull::new_unchecked(Box::into_raw(allocation)))
-        }
+        unsafe { Ptr(NonNull::new_unchecked(Box::into_raw(allocation))) }
     }
 }
 
@@ -51,7 +49,10 @@ impl Allocation<Data> {
 
 impl<T: ?Sized> Allocation<T> {
     pub unsafe fn mark(&self) {
-        debug!("MARKING object at:          {:x}", self.erased() as *const _ as usize);
+        debug!(
+            "MARKING object at:          {:x}",
+            self.erased() as *const _ as usize
+        );
         if !self.header.marked.replace(true) {
             self.dyn_data().mark()
         }
@@ -90,9 +91,7 @@ impl<T: ?Sized> Allocation<T> {
     }
 
     fn erased(&self) -> &Allocation<Data> {
-        unsafe {
-            &*(self as *const Allocation<T> as *const Allocation<Data>)
-        }
+        unsafe { &*(self as *const Allocation<T> as *const Allocation<Data>) }
     }
 }
 
@@ -115,6 +114,7 @@ fn extract_vtable<T: Trace>(data: &T) -> *mut Vtable {
     }
 }
 
+// TODO Remove unstable feature and make types that reflect its traits.
 unsafe impl Send for Header {}
 unsafe impl Sync for Header {}
 
@@ -126,9 +126,11 @@ pub struct Ptr<T: ?Sized>(pub NonNull<T>);
 unsafe impl<T: ?Sized + Send> Send for Ptr<T> {}
 unsafe impl<T: ?Sized + Sync> Sync for Ptr<T> {}
 
-impl<T: ?Sized> Copy for Ptr<T> { }
+impl<T: ?Sized> Copy for Ptr<T> {}
 impl<T: ?Sized> Clone for Ptr<T> {
-    fn clone(&self) -> Ptr<T> { *self }
+    fn clone(&self) -> Ptr<T> {
+        *self
+    }
 }
 
 impl<T: ?Sized> Deref for Ptr<T> {

@@ -1,6 +1,5 @@
 use super::*;
 
-
 #[test]
 fn stack_rooted() {
     let _ = env_logger::try_init();
@@ -15,10 +14,12 @@ fn stack_rooted() {
 #[test]
 fn rerooting() {
     let _ = env_logger::try_init();
-    
-    {   letroot!(outer_root);
 
-        let ptr2 = {   letroot!(inner_root);
+    {
+        letroot!(outer_root);
+
+        let ptr2 = {
+            letroot!(inner_root);
 
             // It is in fact a pointer to the value
             let ptr1 = inner_root.gc(0xBEEFDAD);
@@ -43,7 +44,6 @@ fn rerooting() {
         // Ensure that the object is still rooted and not collected
         collect();
         assert_eq!(*ptr2, 0xBEEFDAD);
-
     }
 
     // Ensure that it gets collected once all roots are gone

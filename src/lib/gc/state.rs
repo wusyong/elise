@@ -1,7 +1,7 @@
 use std::pin::Pin;
 
-use dashmap::DashMap;
 use dashmap::iter::Iter;
+use dashmap::DashMap;
 use log::*;
 
 use crate::alloc::{Allocation, Data, Ptr};
@@ -19,7 +19,11 @@ impl GcState {
     pub fn collect(self: Pin<&Self>) {
         for pair in self.roots() {
             if let Some(root) = pair.value() {
-                debug!("TRACING from root at:       {:x} (idx {:x})", &*root as *const _ as usize, pair.key());
+                debug!(
+                    "TRACING from root at:       {:x} (idx {:x})",
+                    &*root as *const _ as usize,
+                    pair.key()
+                );
                 unsafe {
                     root.as_ref().mark();
                 }
@@ -28,7 +32,10 @@ impl GcState {
 
         for object in self.objects() {
             if !object.marked() {
-                debug!("FREEING unmarked object at: {:x}", &*object as *const _ as usize);
+                debug!(
+                    "FREEING unmarked object at: {:x}",
+                    &*object as *const _ as usize
+                );
                 unsafe {
                     (&*object as *const Allocation<Data> as *mut Allocation<Data>).free();
                 }
@@ -46,13 +53,21 @@ impl GcState {
 
     pub fn set_root<T: Trace + ?Sized>(self: Pin<&Self>, idx: usize, ptr: GcPtr<T>) {
         let root: Ptr<Allocation<Data>> = ptr.erased();
-        debug!("ENROOTING root at:          {:x} (idx {:x})", root.as_ptr() as usize, idx);
+        debug!(
+            "ENROOTING root at:          {:x} (idx {:x})",
+            root.as_ptr() as usize,
+            idx
+        );
         self.roots.insert(idx, Some(root));
     }
 
     pub fn pop_root(self: Pin<&Self>, idx: usize) {
         if let Some((idx, Some(root))) = self.roots.remove(&idx) {
-            debug!(" DROPPING root at:           {:x} (idx {:x})", root.as_ptr() as usize, idx);
+            debug!(
+                " DROPPING root at:           {:x} (idx {:x})",
+                root.as_ptr() as usize,
+                idx
+            );
         }
     }
 

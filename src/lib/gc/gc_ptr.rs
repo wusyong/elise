@@ -40,7 +40,9 @@ impl<T: ?Sized> GcPtr<T> {
 
     pub(crate) fn erased(self) -> Ptr<Allocation<Data>> {
         unsafe {
-            Ptr(NonNull::new_unchecked(self.inner.as_ptr() as *mut Allocation<Data>))
+            Ptr(NonNull::new_unchecked(
+                self.inner.as_ptr() as *mut Allocation<Data>
+            ))
         }
     }
 
@@ -61,11 +63,13 @@ unsafe impl<T: Trace + ?Sized> Trace for GcPtr<T> {
         super::manage(*self)
     }
 
-    unsafe fn finalize(&mut self) { }
+    unsafe fn finalize(&mut self) {}
 }
 
 impl<T: ?Sized> Clone for GcPtr<T> {
-    fn clone(&self) -> GcPtr<T> { *self }
+    fn clone(&self) -> GcPtr<T> {
+        *self
+    }
 }
 
-impl<T: ?Sized> Copy for GcPtr<T> { }
+impl<T: ?Sized> Copy for GcPtr<T> {}

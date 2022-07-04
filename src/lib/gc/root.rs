@@ -11,7 +11,10 @@ pub struct Root {
 
 impl Root {
     pub fn new() -> Root {
-        Root { idx: COUNTER.fetch_add(1, Ordering::Relaxed) }
+        // TODO better way to create index
+        Root {
+            idx: COUNTER.fetch_add(1, Ordering::Relaxed),
+        }
     }
 
     pub unsafe fn enroot<T: Trace + ?Sized>(&self, gc_ptr: GcPtr<T>) {

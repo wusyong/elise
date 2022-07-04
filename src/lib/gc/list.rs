@@ -1,4 +1,4 @@
-use std::marker::{PhantomPinned, PhantomData};
+use std::marker::{PhantomData, PhantomPinned};
 use std::pin::Pin;
 use std::ptr::NonNull;
 
@@ -7,6 +7,7 @@ use crossbeam::atomic::AtomicCell;
 use crate::alloc::Ptr;
 
 pub struct List<T: AsRef<List<T>> + ?Sized> {
+    // TODO they should be in one cell
     prev: AtomicCell<Option<Ptr<List<T>>>>,
     next: AtomicCell<Option<Ptr<T>>>,
     _pinned: PhantomPinned,
@@ -16,7 +17,7 @@ impl<T: AsRef<List<T>> + ?Sized> Default for List<T> {
     fn default() -> List<T> {
         List {
             prev: AtomicCell::default(),
-            next: AtomicCell::default(), 
+            next: AtomicCell::default(),
             _pinned: PhantomPinned,
         }
     }
@@ -49,10 +50,14 @@ impl<T: AsRef<List<T>> + ?Sized> List<T> {
 impl<T: AsRef<List<T>> + ?Sized> Drop for List<T> {
     fn drop(&mut self) {
         if let Some(prev) = self.prev.load() {
-            unsafe { prev.as_ref().next.store(self.next.load()); }
+            unsafe {
+                prev.as_ref().next.store(self.next.load());
+            }
         }
         if let Some(next) = self.next.load() {
-            unsafe { next.as_ref().as_ref().prev.store(self.prev.load()); }
+            unsafe {
+                next.as_ref().as_ref().prev.store(self.prev.load());
+            }
         }
     }
 }

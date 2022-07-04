@@ -1,10 +1,10 @@
+use proc_macro2::*;
 use syn::*;
 use synstructure::*;
-use proc_macro2::*;
 
 pub fn reroot_impl(s: &Structure) -> TokenStream {
     let rerooted = rerooted(s);
-    
+
     let bounds = bounds(s);
 
     s.gen_impl(quote! {
@@ -19,9 +19,10 @@ pub fn reroot_impl(s: &Structure) -> TokenStream {
 }
 
 fn bounds<'a>(s: &'a Structure) -> impl Iterator<Item = TokenStream> + 'a {
-    s.variants().into_iter().flat_map(|variant| variant.bindings()).map(|b| {
-        field_where_clause(b.ast())
-    })
+    s.variants()
+        .into_iter()
+        .flat_map(|variant| variant.bindings())
+        .map(|b| field_where_clause(b.ast()))
 }
 
 fn field_where_clause(field: &Field) -> TokenStream {
@@ -38,19 +39,23 @@ fn rerooted(s: &Structure) -> PathSegment {
 
 fn self_type(s: &Structure) -> PathSegment {
     let ident = s.ast().ident.clone();
-    let args = s.ast().generics.params.iter().map(|param| {
-        match param {
-            GenericParam::Lifetime(lt)  => GenericArgument::Lifetime(lt.lifetime.clone()),
-            GenericParam::Type(ty)      => {
+    let args = s
+        .ast()
+        .generics
+        .params
+        .iter()
+        .map(|param| match param {
+            GenericParam::Lifetime(lt) => GenericArgument::Lifetime(lt.lifetime.clone()),
+            GenericParam::Type(ty) => {
                 let ty = &ty.ident;
                 GenericArgument::Type(parse2(quote!(#ty)).unwrap())
             }
-            GenericParam::Const(konst)  => {
+            GenericParam::Const(konst) => {
                 let konst = &konst.ident;
                 GenericArgument::Const(parse2(quote!(#konst)).unwrap())
             }
-        }
-    }).collect();
+        })
+        .collect();
 
     PathSegment {
         ident,
@@ -69,6 +74,8 @@ impl fold::Fold for RootFolder {
     fn fold_lifetime(&mut self, lifetime: Lifetime) -> Lifetime {
         if lifetime.ident == "root" {
             Lifetime::new("'__root", Span::call_site())
-        } else { lifetime }
+        } else {
+            lifetime
+        }
     }
 }

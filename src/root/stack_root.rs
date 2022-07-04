@@ -2,8 +2,8 @@ use std::pin::Pin;
 
 use gc::{GcPtr, Trace};
 
-use crate::Gc;
 use crate::root::Reroot;
+use crate::Gc;
 
 pub struct Root<'root> {
     root: Pin<&'root mut gc::Root>,
@@ -12,28 +12,29 @@ pub struct Root<'root> {
 impl<'root> Root<'root> {
     #[doc(hidden)]
     pub unsafe fn new(root: &'root mut gc::Root) -> Root<'root> {
-        Root { root: Pin::new_unchecked(root) }
+        Root {
+            root: Pin::new_unchecked(root),
+        }
     }
 
-    pub fn gc<T>(self, data: T) -> Gc<'root, T::Rerooted> where
+    pub fn gc<T>(self, data: T) -> Gc<'root, T::Rerooted>
+    where
         T: Reroot<'root> + Trace,
         T::Rerooted: Trace,
     {
-        unsafe {
-            self.make(gc::alloc_unmanaged(data))
-        }
+        unsafe { self.make(gc::alloc_unmanaged(data)) }
     }
 
-    pub fn reroot<T>(self, gc: Gc<'_, T>) -> Gc<'root, T::Rerooted> where
+    pub fn reroot<T>(self, gc: Gc<'_, T>) -> Gc<'root, T::Rerooted>
+    where
         T: Reroot<'root> + ?Sized,
         T::Rerooted: Trace,
     {
-        unsafe {
-            self.make(Gc::raw(gc))
-        }
+        unsafe { self.make(Gc::raw(gc)) }
     }
 
-    pub(crate) unsafe fn make<T>(mut self, ptr: GcPtr<T>) -> Gc<'root, T::Rerooted> where
+    pub(crate) unsafe fn make<T>(mut self, ptr: GcPtr<T>) -> Gc<'root, T::Rerooted>
+    where
         T: Reroot<'root> + ?Sized,
         T::Rerooted: Trace,
     {

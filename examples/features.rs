@@ -5,9 +5,12 @@ use shifgrethor::{Gc, GcStore};
 #[derive(shifgrethor::GC)]
 #[gc(finalize)]
 struct Foo<'root> {
-    #[gc] item: GcStore<'root, i32>,
-    #[gc] vec: Vec<GcStore<'root, i32>>,
-    #[gc] option: Option<GcStore<'root, i32>>,
+    #[gc]
+    item: GcStore<'root, i32>,
+    #[gc]
+    vec: Vec<GcStore<'root, i32>>,
+    #[gc]
+    option: Option<GcStore<'root, i32>>,
     local: i32,
 }
 
