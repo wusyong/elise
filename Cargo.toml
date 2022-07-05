@@ -1,21 +1,24 @@
 [package]
 name = "elise"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "A concurrent GC."
 license = "Apache-2.0 OR MIT"
+repository = "https://github.com/wusyong/Elise"
+documentation = "https://docs.rs/elise"
+readme = "README.md"
 
 [dependencies]
 pin-cell = "0.1.1"
 
 [dependencies.derive]
 path = "crates/derive"
-version = "0.1.0"
+version = "0.1.1"
 package = "elise-derive"
 
 [dependencies.gc]
 path = "crates/gc"
-version = "0.1.0"
+version = "0.1.1"
 package = "elise-gc"
 
 [dev-dependencies]

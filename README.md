@@ -1,9 +1,16 @@
 # Für Elise
 
+[![](https://img.shields.io/crates/v/elise?style=flat-square)](https://crates.io/crates/elise)
+[![](https://img.shields.io/docsrs/elise?style=flat-square)](https://docs.rs/elise/)
+![](https://img.shields.io/crates/l/elise?style=flat-square)
+
 ## What is `elise`?
 
-Für Elise (short for Elise) is a concurrent garbage collection crate based on
-shifgrethor.
+Für Elise (short for Elise) is a concurrent garbage collection attempt based on
+[shifgrethor][gc]. The goal is to define an API for precise, tracing garbage
+collection in Rust which upholds all of Rust's safety guarantees. A user using
+the API defined in this library will not be at risk for any of the kinds of
+memory errors that Rust can prevent.
 
 ## What kind of access does `elise` provide to data?
 
@@ -44,8 +51,8 @@ these properties:
   garbage collection techniques like reference counting.
 - This is an API for [precise][precise] tracing collectors, not a conservative
   collector like the Boehme GC.
-- The API could be trivially adapted to support concurrent GCs, though the
-  current implementation is not thread safe.
+- The API could be trivially adapted to support concurrent GCs, the current
+  implementation provides a thread safe `HeapRoot`.
 - The API *can* support moving collectors as long as they implement a pinning
   mechanism. A moving collector which does not support pinning is incompatible
   with elise's API goals.
@@ -62,7 +69,7 @@ production")!** But if you want to play around with it for fun, by all means.
 
 ## What is `elise` going to be used for?
 
-No idea! This is currently a research project.
+This is currently an experimental project for my JavaScript engine.
 
 ## Why is it called `elise`?
 
@@ -304,6 +311,7 @@ Its an open problem to find new abstractable APIs which allow moving data only
 between traced memory locations, which would allow you to safely move Gc
 pointers around.
 
+[gc]: https://github.com/withoutboats/shifgrethor
 [tracing]: https://en.wikipedia.org/wiki/Tracing_garbage_collection
 [precise]: https://en.wikipedia.org/wiki/Tracing_garbage_collection#Precise_vs._conservative_and_internal_pointers
 

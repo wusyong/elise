@@ -1,9 +1,11 @@
 [package]
 name = "elise-derive"
 edition = "2021"
-version = "0.1.0"
-description = "Macros of Für Elise"
+version = "0.1.1"
+description = "Macros Für Elise"
 license = "Apache-2.0 OR MIT"
+repository = "https://github.com/wusyong/Elise"
+documentation = "https://docs.rs/elise-derive"
 
 [dependencies]
 quote = "0.6.8"

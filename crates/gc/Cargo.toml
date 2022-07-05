@@ -1,9 +1,11 @@
 [package]
 name = "elise-gc"
 edition = "2021"
-version = "0.1.0"
-description = "Raw GC of Für Elise"
+version = "0.1.1"
+description = "Raw GC Für Elise"
 license = "Apache-2.0 OR MIT"
+repository = "https://github.com/wusyong/Elise"
+documentation = "https://docs.rs/elise-gc"
 
 [lib]
 path = "lib.rs"
