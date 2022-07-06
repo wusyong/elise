@@ -40,6 +40,7 @@ impl<'root> Root<'root> {
     {
         let ptr = super::reroot(ptr);
         self.emplace(ptr);
+        gc::manage::<T::Rerooted>(ptr);
         Gc::rooted(ptr)
     }
 

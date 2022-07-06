@@ -41,6 +41,7 @@ where
         let ptr = super::reroot(ptr);
         let root = Pin::from(Box::new(Root::new()));
         Pin::get_ref(Pin::as_ref(&root)).enroot(ptr);
+        gc::manage::<T::Rerooted>(ptr);
         HeapRoot { root, ptr }
     }
 }

@@ -15,7 +15,6 @@ where
     T::Rerooted: Trace,
 {
     let ptr: GcPtr<T::Rerooted> = mem::transmute_copy(&data);
-    gc::manage::<T::Rerooted>(ptr);
     ptr
 }
 
