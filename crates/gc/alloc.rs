@@ -8,9 +8,12 @@ use log::*;
 use crate::list::List;
 use crate::trace::Trace;
 
-extern "C" {
-    pub type Data;
-    type Vtable;
+pub struct Data {
+    _priv: (),
+}
+
+struct Vtable {
+    _priv: (),
 }
 
 pub struct Allocation<T: ?Sized> {
@@ -114,12 +117,8 @@ fn extract_vtable<T: Trace>(data: &T) -> *mut Vtable {
     }
 }
 
-// TODO Remove unstable feature and make types that reflect its traits.
 unsafe impl Send for Header {}
 unsafe impl Sync for Header {}
-
-unsafe impl Send for Data {}
-unsafe impl Sync for Data {}
 
 pub struct Ptr<T: ?Sized>(pub NonNull<T>);
 

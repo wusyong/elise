@@ -1,4 +1,3 @@
-#![feature(extern_types)]
 mod alloc;
 mod gc_ptr;
 mod list;
