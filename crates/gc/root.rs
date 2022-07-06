@@ -1,9 +1,12 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use crossbeam::queue::SegQueue;
+
 use crate::gc_ptr::GcPtr;
 use crate::trace::Trace;
 
 static COUNTER: AtomicUsize = AtomicUsize::new(0);
+static RECYCLE: SegQueue<usize> = SegQueue::new();
 
 pub struct Root {
     idx: usize,
@@ -11,9 +14,10 @@ pub struct Root {
 
 impl Root {
     pub fn new() -> Root {
-        // TODO better way to create index
         Root {
-            idx: COUNTER.fetch_add(1, Ordering::Relaxed),
+            idx: RECYCLE
+                .pop()
+                .unwrap_or(COUNTER.fetch_add(1, Ordering::Relaxed)),
         }
     }
 
@@ -24,6 +28,7 @@ impl Root {
 
 impl Drop for Root {
     fn drop(&mut self) {
+        RECYCLE.push(self.idx);
         super::pop_root(self.idx);
     }
 }
