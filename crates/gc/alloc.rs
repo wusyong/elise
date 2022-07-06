@@ -41,9 +41,9 @@ impl<T: Trace> Allocation<T> {
 }
 
 impl Allocation<Data> {
-    pub unsafe fn free(self: *mut Allocation<Data>) {
-        (&mut *self).dyn_data_mut().finalize();
-        drop(Box::from_raw(self))
+    pub unsafe fn free(this: *mut Allocation<Data>) {
+        (&mut *this).dyn_data_mut().finalize();
+        drop(Box::from_raw(this))
     }
 }
 

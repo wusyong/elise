@@ -37,7 +37,7 @@ impl GcState {
                     &*object as *const _ as usize
                 );
                 unsafe {
-                    (&*object as *const Allocation<Data> as *mut Allocation<Data>).free();
+                    Allocation::free(&*object as *const Allocation<Data> as *mut Allocation<Data>);
                 }
             }
         }

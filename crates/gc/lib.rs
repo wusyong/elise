@@ -1,4 +1,4 @@
-#![feature(extern_types, arbitrary_self_types)]
+#![feature(extern_types)]
 mod alloc;
 mod gc_ptr;
 mod list;
@@ -17,9 +17,6 @@ pub use crate::root::Root;
 pub use crate::trace::{NullTrace, Trace};
 
 static GC: Lazy<GcState> = Lazy::new(|| GcState::default());
-// thread_local! {
-//     static GC: GcState = GcState::default();
-// }
 
 /// Allocate an unmanaged GcPtr
 pub fn alloc_unmanaged<T: Trace>(data: T) -> GcPtr<T> {
