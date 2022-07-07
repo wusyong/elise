@@ -107,7 +107,7 @@ with this macro carry a special lifetime called `'root`, which is the lifetime
 of the scope they are created in. You can use the `gc` method on a root to
 begin garbage collecting some data:
 
-```rust
+```rust, ignore
 // root: Root<'root>;
 letroot!(root);
 
@@ -121,7 +121,7 @@ outlive the root you used to create it.
 In order to return Gc'd data from a function, you need to pass a root into the
 function:
 
-```rust
+```rust, ignore
 fn foo(root: Root<'root>) -> Gc<'root, i32> {
     root.gc(0);
 }
@@ -130,7 +130,7 @@ fn foo(root: Root<'root>) -> Gc<'root, i32> {
 You can also use a root to reroot data that has already been rooted once,
 extending its lifetime:
 
-```rust
+```rust, ignore
 fn foo(outer: Root<'root1>) -> Gc<'root1, i32> {
     // This root is only alive for the frame of this function call
     //
@@ -175,7 +175,7 @@ Finally, as a part of the same derive which implements the traits necessary to
 garbage collect your type, you can implement an accessor to transform your
 `GcStore` fields into `Gc` fields. For example:
 
-```rust
+```rust, ignore
 #[derive(GC)]
 struct Foo<'root> {
     #[gc] bar: GcStore<'root, Bar>,
@@ -184,7 +184,7 @@ struct Foo<'root> {
 
 This code gives generates this method on Foo:
 
-```rust
+```rust, ignore
 fn bar(self: Gc<'root, Foo<'_>>) -> Gc<'root, Bar>
 ```
 
@@ -194,7 +194,7 @@ have a `Gc<Foo>`, it is safe to construct a `Gc<Bar>` from it.
 This behavior is also implemented for several container types. For example, you
 can transform a `Vec<GcStore<_>>` to a `Vec<Gc>` in the same way:
 
-```rust
+```rust, ignore
 #[derive(GC)]
 struct Foo<'root> {
     #[gc] vec: Vec<GcStore<'root, Bar>>,
@@ -221,7 +221,7 @@ finalizer just before collecting each object. You can define what happens in
 the finalizer by implementing the `Finalize` trait for your type and adding a
 `#[gc(finalize)]` attribute to your struct:
 
-```rust
+```rust, ignore
 #[derive(GC)]
 #[gc(finalize)]
 struct Foo;
@@ -243,7 +243,7 @@ As a result, if your type contains any lifetimes other than `'root`, attempting
 to implement a finalizer like this will fail. Instead, you will need to
 implement an unsafe finalizer:
 
-```rust
+```rust, ignore
 #[derive(GC)]
 #[gc(unsafe_finalize)]
 struct Foo<'a>(&'a i32);
@@ -268,7 +268,7 @@ using some form of interior mutability.
 The unique problem has to do with tracing. Let's say you have a
 `RefCell<Option<GcStore<i32>>>` inside of your type:
 
-```rust
+```rust, ignore
 let x: Gc<RefCell<Option<GcStore<i32>>>>;
 
 let moved: GcStore<i32> = x.borrow_mut().take().unwrap();

@@ -3,8 +3,7 @@
 // the bridge, the only bridge, across what divided us.
 //      - Ursula K. Le Guin
 
-// TODO explain basic usage.
-//! A concurrent GC.
+#![doc = include_str!("../README.md")]
 
 mod gc;
 mod gc_store;

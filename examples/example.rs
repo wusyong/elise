@@ -1,8 +1,6 @@
 #![feature(arbitrary_self_types)]
 
-use std::borrow::Borrow;
-
-use elise::{letroot, Finalize, Gc, GcStore, HeapRoot, GC};
+use elise::{Finalize, Gc, GcStore, HeapRoot, GC};
 
 #[derive(GC)]
 #[gc(finalize)]
@@ -52,7 +50,6 @@ fn main() {
     {
         let foo = Foo::new(2, String::from("Hello, world!"));
         let root = HeapRoot::new(foo);
-        // letroot!(root);
         let foo = root.gc();
         elise::collect();
         println!("{}", foo.gc_method(2));
