@@ -2,22 +2,22 @@ use std::marker::{PhantomData, PhantomPinned};
 use std::pin::Pin;
 use std::ptr::NonNull;
 
-use crossbeam::atomic::AtomicCell;
+use parking_lot::RwLock;
 
 use crate::alloc::Ptr;
 
 pub struct List<T: AsRef<List<T>> + ?Sized> {
-    // TODO they should be in one cell
-    prev: AtomicCell<Option<Ptr<List<T>>>>,
-    next: AtomicCell<Option<Ptr<T>>>,
+    // parking_lot::RwLock is just an AtomicUsize
+    prev: RwLock<Option<Ptr<List<T>>>>,
+    next: RwLock<Option<Ptr<T>>>,
     _pinned: PhantomPinned,
 }
 
 impl<T: AsRef<List<T>> + ?Sized> Default for List<T> {
     fn default() -> List<T> {
         List {
-            prev: AtomicCell::default(),
-            next: AtomicCell::default(),
+            prev: RwLock::default(),
+            next: RwLock::default(),
             _pinned: PhantomPinned,
         }
     }
@@ -29,34 +29,42 @@ impl<T: AsRef<List<T>> + ?Sized> List<T> {
         let new: &T = &*new;
 
         let list: &List<T> = new.as_ref();
-        list.prev.store(Some(Ptr(NonNull::from(this))));
-        list.next.store(this.next.load());
+        let mut list_prev = list.prev.write();
+        let mut list_next = list.next.write();
+        let mut this_next = this.next.write();
+        *list_prev = Some(Ptr(NonNull::from(this)));
+        *list_next = *this_next;
 
-        if let Some(next) = this.next.load() {
+        if let Some(next) = *this_next {
             unsafe {
                 let next: &List<T> = next.as_ref().as_ref();
-                next.prev.store(Some(Ptr(NonNull::from(list))));
+                let mut next_prev = next.prev.write();
+                *next_prev = Some(Ptr(NonNull::from(list)));
             }
         }
 
-        this.next.store(Some(Ptr(NonNull::from(new))));
+        *this_next = Some(Ptr(NonNull::from(new)));
     }
 
     pub fn is_head(&self) -> bool {
-        self.prev.load().is_none()
+        self.prev.read().is_none()
     }
 }
 
 impl<T: AsRef<List<T>> + ?Sized> Drop for List<T> {
     fn drop(&mut self) {
-        if let Some(prev) = self.prev.load() {
+        let prev = self.prev.read();
+        let next = self.next.read();
+        if let Some(prev) = *prev {
             unsafe {
-                prev.as_ref().next.store(self.next.load());
+                let mut prev_next = prev.as_ref().next.write();
+                *prev_next = *next;
             }
         }
-        if let Some(next) = self.next.load() {
+        if let Some(next) = *next {
             unsafe {
-                next.as_ref().as_ref().prev.store(self.prev.load());
+                let mut next_prev = next.as_ref().as_ref().prev.write();
+                *next_prev = *prev;
             }
         }
     }
@@ -67,7 +75,7 @@ impl<'a, T: AsRef<List<T>> + ?Sized> IntoIterator for Pin<&'a List<T>> {
     type Item = Pin<&'a T>;
     fn into_iter(self) -> Iter<'a, T> {
         Iter {
-            next: (*self).next.load(),
+            next: *(*self).next.read(),
             _marker: PhantomData,
         }
     }
@@ -83,7 +91,7 @@ impl<'a, T: AsRef<List<T>> + ?Sized> Iterator for Iter<'a, T> {
     fn next(&mut self) -> Option<Pin<&'a T>> {
         if let Some(next) = self.next {
             unsafe {
-                self.next = next.as_ref().as_ref().next.load();
+                self.next = *next.as_ref().as_ref().next.read();
                 Some(Pin::new_unchecked(&*next.as_ptr()))
             }
         } else {
