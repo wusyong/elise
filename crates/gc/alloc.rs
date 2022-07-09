@@ -1,11 +1,10 @@
-use std::cell::Cell;
 use std::mem;
 use std::ops::{Deref, DerefMut};
 use std::ptr::NonNull;
+use std::sync::atomic::{AtomicBool, Ordering::*};
 
 use log::*;
 
-use crate::list::List;
 use crate::trace::Trace;
 
 pub struct Data {
@@ -22,9 +21,9 @@ pub struct Allocation<T: ?Sized> {
 }
 
 struct Header {
-    list: List<Allocation<Data>>,
     vtable: *mut Vtable,
-    marked: Cell<bool>,
+    marked: AtomicBool,
+    managed: AtomicBool,
 }
 
 impl<T: Trace> Allocation<T> {
@@ -33,9 +32,9 @@ impl<T: Trace> Allocation<T> {
 
         let allocation = Box::new(Allocation {
             header: Header {
-                list: List::default(),
                 vtable,
-                marked: Cell::new(false),
+                marked: AtomicBool::new(false),
+                managed: AtomicBool::new(false),
             },
             data,
         });
@@ -56,7 +55,7 @@ impl<T: ?Sized> Allocation<T> {
             "MARKING object at:          {:x}",
             self.erased() as *const _ as usize
         );
-        if !self.header.marked.replace(true) {
+        if !self.header.marked.swap(true, AcqRel) {
             self.dyn_data().mark()
         }
     }
@@ -66,11 +65,15 @@ impl<T: ?Sized> Allocation<T> {
     }
 
     pub fn marked(&self) -> bool {
-        self.header.marked.replace(false)
+        self.header.marked.swap(false, AcqRel)
     }
 
     pub fn is_unmanaged(&self) -> bool {
-        self.header.list.is_head()
+        self.header.marked.load(Acquire)
+    }
+
+    pub fn managed(&self) {
+        self.header.managed.store(true, Release);
     }
 
     fn dyn_data(&self) -> &dyn Trace {
@@ -98,12 +101,6 @@ impl<T: ?Sized> Allocation<T> {
     }
 }
 
-impl AsRef<List<Allocation<Data>>> for Allocation<Data> {
-    fn as_ref(&self) -> &List<Allocation<Data>> {
-        &self.header.list
-    }
-}
-
 #[repr(C)]
 struct Object {
     data: *const Data,
@@ -117,13 +114,7 @@ fn extract_vtable<T: Trace>(data: &T) -> *mut Vtable {
     }
 }
 
-unsafe impl Send for Header {}
-unsafe impl Sync for Header {}
-
 pub struct Ptr<T: ?Sized>(pub NonNull<T>);
-
-unsafe impl<T: ?Sized + Send> Send for Ptr<T> {}
-unsafe impl<T: ?Sized + Sync> Sync for Ptr<T> {}
 
 impl<T: ?Sized> Copy for Ptr<T> {}
 impl<T: ?Sized> Clone for Ptr<T> {

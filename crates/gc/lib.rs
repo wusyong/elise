@@ -1,6 +1,5 @@
 mod alloc;
 mod gc_ptr;
-mod list;
 mod root;
 mod state;
 mod trace;
@@ -40,7 +39,7 @@ pub unsafe fn manage<T: Trace + ?Sized>(ptr: GcPtr<T>) {
 
 /// Count objects managed by the GC
 pub fn count_managed_objects() -> usize {
-    with_gc(|gc| gc.objects().into_iter().count())
+    with_gc(|gc| gc.count_objects())
 }
 
 /// Count roots into the GC

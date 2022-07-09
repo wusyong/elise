@@ -29,10 +29,6 @@ impl<'root, T: ?Sized> GcStore<'root, T> {
         }
     }
 
-    pub fn get_mut(&mut self) -> &mut T {
-        panic!()
-    }
-
     pub fn get_maybe(&self) -> Option<&T> {
         unsafe {
             if self.ptr.is_unmanaged() {
@@ -41,10 +37,6 @@ impl<'root, T: ?Sized> GcStore<'root, T> {
                 None
             }
         }
-    }
-
-    pub fn get_mut_maybe(&mut self) -> Option<&mut T> {
-        panic!()
     }
 
     pub fn raw(this: &GcStore<'root, T>) -> GcPtr<T> {

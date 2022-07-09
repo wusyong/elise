@@ -1,17 +1,18 @@
 use std::pin::Pin;
+use std::ptr::NonNull;
 
+use crossbeam::queue::SegQueue;
 use dashmap::iter::Iter;
 use dashmap::DashMap;
 use log::*;
 
 use crate::alloc::{Allocation, Data, Ptr};
 use crate::gc_ptr::GcPtr;
-use crate::list::List;
 use crate::trace::Trace;
 
 #[derive(Default)]
 pub struct GcState {
-    objects: List<Allocation<Data>>,
+    objects: SegQueue<Ptr<Allocation<Data>>>,
     roots: DashMap<usize, Option<Ptr<Allocation<Data>>>>,
 }
 
@@ -30,15 +31,26 @@ impl GcState {
             }
         }
 
-        for object in self.objects() {
-            if !object.marked() {
-                debug!(
-                    "FREEING unmarked object at: {:x}",
-                    &*object as *const _ as usize
-                );
-                unsafe {
-                    Allocation::free(&*object as *const Allocation<Data> as *mut Allocation<Data>);
+        // TODO pop and push back
+        for _ in 0..self.count_objects() {
+            match self.objects().pop() {
+                Some(object) => {
+                    let ptr = unsafe { object.as_ref() };
+                    if !ptr.marked() {
+                        debug!(
+                            "FREEING unmarked object at: {:x}",
+                            &*object as *const _ as usize
+                        );
+                        unsafe {
+                            Allocation::free(
+                                ptr as *const Allocation<Data> as *mut Allocation<Data>,
+                            );
+                        }
+                    } else {
+                        self.objects().push(object);
+                    }
                 }
+                None => break,
             }
         }
     }
@@ -46,7 +58,9 @@ impl GcState {
     pub unsafe fn manage<T: Trace + ?Sized>(self: Pin<&Self>, ptr: GcPtr<T>) {
         // TODO I should not need a dynamic check here but I am making mistakes
         if ptr.is_unmanaged() {
-            self.objects().insert(ptr.erased_pinned());
+            let ptr = Ptr(NonNull::from(&*ptr.erased_pinned()));
+            ptr.as_ref().managed();
+            self.objects().push(ptr);
         }
         ptr.data().manage();
     }
@@ -79,7 +93,14 @@ impl GcState {
         self.roots.len()
     }
 
-    pub fn objects<'a>(self: Pin<&'a Self>) -> Pin<&'a List<Allocation<Data>>> {
+    pub fn objects<'a>(self: Pin<&'a Self>) -> Pin<&'a SegQueue<Ptr<Allocation<Data>>>> {
         unsafe { Pin::map_unchecked(self, |this| &this.objects) }
     }
+
+    pub fn count_objects(&self) -> usize {
+        self.objects.len()
+    }
 }
+
+unsafe impl Send for GcState {}
+unsafe impl Sync for GcState {}

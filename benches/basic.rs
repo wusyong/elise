@@ -1,5 +1,5 @@
 #![feature(arbitrary_self_types)]
-use criterion::{Criterion, black_box};
+use criterion::{black_box, Criterion};
 // use elise::{GcStore, Gc, collect, raw, letroot, GC};
 
 #[macro_use]
@@ -27,6 +27,7 @@ extern crate criterion;
 //     }
 // }
 
+/// Create a Gc pointer.
 fn create(b: &mut Criterion) {
     b.bench_function("shifgrethor-create", |b| {
         b.iter(|| {
@@ -45,6 +46,7 @@ fn create(b: &mut Criterion) {
     elise::collect();
 }
 
+/// Create a Gc pointer and then collect.
 fn oneshot(b: &mut Criterion) {
     b.bench_function("shifgrethor-oneshot", |b| {
         b.iter(|| {
@@ -67,11 +69,40 @@ fn oneshot(b: &mut Criterion) {
     });
 }
 
+/// Create 1,000,000 Gc pointers with 10 collects.
+fn chonk(b: &mut Criterion) {
+    // b.bench_function("shifgrethor-chonk", |b| {
+    //     b.iter(|| {
+    //         for _ in 0..10 {
+    //             for _ in 0..100000 {
+    //                 shifgrethor::letroot!(root);
+    //                 root.gc(u32::MAX);
+    //             }
+    //             shifgrethor::collect();
+    //         }
+    //     });
+    // });
+
+    b.bench_function("elise-chonk", |b| {
+        b.iter(|| {
+            for _ in 0..10 {
+                for _ in 0..100000 {
+                    elise::letroot!(root);
+                    root.gc(u32::MAX);
+                }
+                elise::collect();
+                dbg!(elise::raw::count_managed_objects());
+            }
+        });
+    });
+}
+
 // TODO test more threads and types
 criterion_group!(
     compare,
     create,
     oneshot,
+    chonk,
 );
 
 criterion_main!(compare);
