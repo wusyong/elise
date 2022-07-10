@@ -1,31 +1,12 @@
 #![feature(arbitrary_self_types)]
+use std::{thread, time::Duration};
+
 use criterion::{black_box, Criterion};
+use elise::HeapRoot;
 // use elise::{GcStore, Gc, collect, raw, letroot, GC};
 
 #[macro_use]
 extern crate criterion;
-
-// #[derive(GC)]
-// struct Foo<'root> {
-//     #[gc]
-//     item: GcStore<'root, i32>,
-//     #[gc]
-//     vec: Vec<GcStore<'root, i32>>,
-//     #[gc]
-//     option: Option<GcStore<'root, i32>>,
-//     local: i32,
-// }
-
-// impl<'root> Foo<'root> {
-//     fn new() -> Foo<'root> {
-//         Foo {
-//             item: GcStore::new(0),
-//             vec: vec![GcStore::new(1), GcStore::new(2), GcStore::new(3)],
-//             option: Some(GcStore::new(4)),
-//             local: 5,
-//         }
-//     }
-// }
 
 /// Create a Gc pointer.
 fn create(b: &mut Criterion) {
@@ -71,17 +52,17 @@ fn oneshot(b: &mut Criterion) {
 
 /// Create 1,000,000 Gc pointers with 10 collects.
 fn chonk(b: &mut Criterion) {
-    // b.bench_function("shifgrethor-chonk", |b| {
-    //     b.iter(|| {
-    //         for _ in 0..10 {
-    //             for _ in 0..100000 {
-    //                 shifgrethor::letroot!(root);
-    //                 root.gc(u32::MAX);
-    //             }
-    //             shifgrethor::collect();
-    //         }
-    //     });
-    // });
+    b.bench_function("shifgrethor-chonk", |b| {
+        b.iter(|| {
+            for _ in 0..10 {
+                for _ in 0..100000 {
+                    shifgrethor::letroot!(root);
+                    root.gc(u32::MAX);
+                }
+                shifgrethor::collect();
+            }
+        });
+    });
 
     b.bench_function("elise-chonk", |b| {
         b.iter(|| {
@@ -91,7 +72,43 @@ fn chonk(b: &mut Criterion) {
                     root.gc(u32::MAX);
                 }
                 elise::collect();
-                dbg!(elise::raw::count_managed_objects());
+            }
+        });
+    });
+}
+
+// TODO Make this function paramterable.
+/// Create 10 threads and each creates 100,000 GC pointers.
+/// 1% of GC pointers are kept until thread join.
+fn tide(b: &mut Criterion) {
+    b.bench_function("elise-tide", |b| {
+        thread::spawn(|| {
+            thread::sleep(Duration::new(1, 0));
+            elise::collect();
+        });
+
+        b.iter(|| {
+            let mut threads = vec![];
+            for _ in 0..10 {
+                // thread
+                let t = thread::spawn(|| {
+                    let mut keeps = vec![];
+                    for i in 0..100000 {
+                        // roots
+                        if i % 100 == 0 {
+                            let root = HeapRoot::new(1);
+                            keeps.push(root);
+                        } else {
+                            elise::letroot!(root);
+                            root.gc(u32::MAX);
+                        }
+                    }
+                });
+                threads.push(t);
+            }
+
+            for t in threads {
+                t.join().unwrap();
             }
         });
     });
@@ -99,10 +116,10 @@ fn chonk(b: &mut Criterion) {
 
 // TODO test more threads and types
 criterion_group!(
-    compare,
-    create,
-    oneshot,
-    chonk,
+    compare, // create,
+    // oneshot,
+    // chonk,
+    tide
 );
 
 criterion_main!(compare);
