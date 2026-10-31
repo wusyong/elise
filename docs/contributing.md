@@ -2,11 +2,11 @@
 
 ## 和 kun 的關係
 
-elise 從 [kun](https://gitlab.com/kunlabs/kun) 的 `gc` crate 分出來。在 kun 換過來用它之前，kun 仍然用自己的 `crates/gc`，兩邊的改動要手動同步：除了 crate 的名字（`gc` → `elise`、`gc_macros` → `elise_macros`）、指向 kun 的路徑和指令，和 `cargo fmt` 排的格式，程式碼和測試一樣。kun 換過來時直接依賴 `elise`，不改名。
+elise 從 [kun](https://gitlab.com/kunlabs/kun) 的 `gc` crate 分出來。在 kun 換過來用它之前，kun 仍然用自己的 `crates/gc`，兩邊的改動要手動同步：除了 crate 的名字（`gc` → `elise`、`gc_macros` → `elise-derive`）、指向 kun 的路徑和指令，和 `cargo fmt` 排的格式，程式碼和測試一樣。kun 換過來時直接依賴 `elise`，不改名。
 
 ## 規則
 
-- **`unsafe` 只在 `elise`**：workspace 的 `unsafe_code = "deny"` 擋掉其他地方（`elise_macros` 產生的程式碼也受它管），只有 `crates/elise/src/lib.rs` 和它的整合測試打開。每一處都有 `// SAFETY:` 說明；改了論證要更新 [`soundness.md`](soundness.md)。用 elise 的程式碼不寫 `unsafe`。
+- **`unsafe` 只在 `elise`**：workspace 的 `unsafe_code = "deny"` 擋掉其他地方（`elise-derive` 產生的程式碼也受它管），只有 `crates/elise/src/lib.rs` 和它的整合測試打開。每一處都有 `// SAFETY:` 說明；改了論證要更新 [`soundness.md`](soundness.md)。用 elise 的程式碼不寫 `unsafe`。
 - **整合測試是 `tests/it/` 的模組**（加一個檔案、在 `main.rs` 加一行 `mod`），不直接放在 `tests/` 底下：那會多一個要重新 link 的 binary。trybuild 的 `tests/compile_fail.rs` 例外。
 - **文字檔一律 LF**（`.gitattributes`）。`crates/elise/fuzz/regressions/` 的 `.bin` 照原樣保存。
 - **新的行為要有測試**，並且弄壞實作確認有測試失敗（mutation test）。

@@ -63,7 +63,7 @@ mod vector;
 mod worklist;
 
 pub use data::HeapData;
-pub use elise_macros::GcObject;
+pub use elise_derive::GcObject;
 pub use ephemeron::EphemeronPair;
 pub use external::{External, LocalExternal};
 pub use gc_ptr::Gc;

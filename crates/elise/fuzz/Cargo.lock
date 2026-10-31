@@ -122,7 +122,7 @@ checksum = "e6d5a32815ae3f33302d95fdcb2ce17862f8c65363dcfd29360480ba1001fc9c"
 name = "elise"
 version = "0.0.1"
 dependencies = [
- "elise_macros",
+ "elise-derive",
  "loom",
  "rustix",
  "shuttle",
@@ -139,7 +139,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "elise_macros"
+name = "elise-derive"
 version = "0.0.1"
 dependencies = [
  "proc-macro2",

@@ -1,6 +1,6 @@
 # API
 
-一個 heap 一個 mutator，GC 只在安全點（兩個操作之間）開始和收尾，所以那時沒有沒 root 的指標，也不掃 stack。`unsafe` 只在 `elise` 裡；用它的程式碼不寫 `unsafe`，論證在 [`soundness.md`](soundness.md)。`#[derive(GcObject)]` 在 `elise_macros`。heap 怎麼運作見 [`design.md`](design.md)。
+一個 heap 一個 mutator，GC 只在安全點（兩個操作之間）開始和收尾，所以那時沒有沒 root 的指標，也不掃 stack。`unsafe` 只在 `elise` 裡；用它的程式碼不寫 `unsafe`，論證在 [`soundness.md`](soundness.md)。`#[derive(GcObject)]` 在 `elise-derive`。heap 怎麼運作見 [`design.md`](design.md)。
 
 ## 型別一覽
 

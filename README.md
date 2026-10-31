@@ -62,11 +62,11 @@ outside the heap. Fields that can't be traced, such as a `Box`, a `Vec` or
 a reference, fail to compile. So does a `Gc` kept past its operation, or an
 object that implements `Drop`.
 
-Until elise is published, depend on it by git:
+To use it:
 
 ```toml
 [dependencies]
-elise = { git = "<this repository>" }
+elise = "0.2"
 ```
 
 ## Safety
@@ -117,7 +117,7 @@ python3 tla/unified/check.py
 ```text
 crates/elise/          the heap
 crates/elise/fuzz/     the fuzz target and the regressions it found
-crates/elise_macros/   #[derive(GcObject)]
+crates/elise-derive/   #[derive(GcObject)]
 docs/                  design and reference documents
 scripts/               test runs beyond cargo test, and the repo's checks
 tla/                   TLA+ models of the marking protocols
