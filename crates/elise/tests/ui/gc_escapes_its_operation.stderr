@@ -1,0 +1,12 @@
+error: lifetime may not live long enough
+  --> tests/ui/gc_escapes_its_operation.rs:14:33
+   |
+14 |     let leaf = heap.mutate(|cx| cx.alloc(LeafInit { value: Cell::new(1) }));
+   |                             --- ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ returning this value requires that `'1` must outlive `'2`
+   |                             | |
+   |                             | return type of closure is Gc<'2, Leaf>
+   |                             has type `&Mutation<'1>`
+   |
+   = note: requirement occurs because of the type `Gc<'_, Leaf>`, which makes the generic argument `'_` invariant
+   = note: the struct `Gc<'gc, T>` is invariant over the parameter `'gc`
+   = help: see <https://doc.rust-lang.org/nomicon/subtyping.html> for more information about variance

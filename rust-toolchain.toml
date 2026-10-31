@@ -1,0 +1,7 @@
+# The toolchain everything is built and tested with: the workspace's
+# `rust-version` (MSRV), so what we test is what we claim to support.
+# Raise both together, and regenerate the trybuild output
+# (`TRYBUILD=overwrite cargo test -p elise --test compile_fail`).
+[toolchain]
+channel = "1.99.0"
+components = ["clippy", "rustfmt"]

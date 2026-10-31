@@ -1,0 +1,61 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+# The fuzzer is a workspace of its own, on nightly (its rust-toolchain.toml).
+exclude = ["crates/elise/fuzz"]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.99"
+publish = false
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+elise = { path = "crates/elise" }
+elise_macros = { path = "crates/elise_macros" }
+
+# Reserving the cage and committing its pages (each crate adds the
+# features it uses).
+rustix = { version = "1", default-features = false, features = ["std"] }
+windows-sys = "0.61"
+# Only the checks of the parallel code (`--cfg loom` / `--cfg shuttle`).
+loom = "0.7"
+shuttle = "0.9"
+# The proved code (`verus!`): the version of the Verus release that checks
+# it (`VERUS_VERSION` in scripts/test.py).
+vstd = "=0.0.0-2026-10-18-0147"
+
+# Proc-macro and test-only crates.
+syn = "2"
+quote = "1"
+proc-macro2 = "1"
+trybuild = "1"
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+# `unsafe` is confined to `elise`, which opts back in at its crate root.
+unsafe_code = "deny"
+# `elise` swaps its atomics, locks and threads for loom's or shuttle's with
+# `--cfg loom` / `--cfg shuttle`, to check its parallel code, and poisons its
+# free slots for ASan under cargo-fuzz's `--cfg fuzzing`; its Verus lemmas
+# are imported under Verus's `cfg(verus_only)`.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(loom)", "cfg(shuttle)", "cfg(fuzzing)", "cfg(verus_only)"] }
+
+[workspace.lints.clippy]
+undocumented_unsafe_blocks = "warn"
+# Integer arithmetic and casts say what overflow does: checked, saturating,
+# wrapping, or an `#[expect(..., reason)]` that says why it can't (the rules
+# are in docs/contributing.md; `sanity.py numerics` checks the exceptions).
+# Tests are exempt, at each root.
+arithmetic_side_effects = "warn"
+cast_possible_truncation = "warn"
+cast_sign_loss = "warn"
+cast_possible_wrap = "warn"
+
+[profile.dev]
+opt-level = 1
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+opt-level = 2

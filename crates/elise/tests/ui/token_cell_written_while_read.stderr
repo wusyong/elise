@@ -1,0 +1,9 @@
+error[E0502]: cannot borrow `token` as mutable because it is also borrowed as immutable
+  --> tests/ui/token_cell_written_while_read.rs:9:18
+   |
+ 8 |     let read = cell.get(&token);
+   |                         ------ immutable borrow occurs here
+ 9 |     cell.replace(&mut token, String::new());
+   |                  ^^^^^^^^^^ mutable borrow occurs here
+10 |     println!("{read}");
+   |                ---- immutable borrow later used here

@@ -1,0 +1,23 @@
+# elise's fuzzer (cargo-fuzz): a workspace of its own, on the nightly
+# its rust-toolchain.toml pins. `python3 scripts/test.py fuzz` runs it.
+[package]
+name = "elise-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+elise = { path = ".." }
+
+[[bin]]
+name = "heap"
+path = "fuzz_targets/heap.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]

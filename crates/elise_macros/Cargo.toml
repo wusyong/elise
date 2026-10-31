@@ -1,0 +1,21 @@
+[package]
+name = "elise_macros"
+description = "#[derive(GcObject)] for objects of elise's heap: the init struct, the layout and the checks on the fields. Used by `elise`."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[lib]
+proc-macro = true
+# No doc examples: skip rustdoc's pass in `cargo test`.
+doctest = false
+
+[lints]
+workspace = true
+
+[dependencies]
+syn.workspace = true
+quote.workspace = true
+proc-macro2.workspace = true

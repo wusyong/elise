@@ -1,0 +1,62 @@
+# API
+
+一個 heap 一個 mutator，GC 只在安全點（兩個操作之間）開始和收尾，所以那時沒有沒 root 的指標，也不掃 stack。`unsafe` 只在 `elise` 裡；用它的程式碼不寫 `unsafe`，論證在 [`soundness.md`](soundness.md)。`#[derive(GcObject)]` 在 `elise_macros`。heap 怎麼運作見 [`design.md`](design.md)。
+
+## 型別一覽
+
+| 型別 | 對應 cppgc | 用途 |
+| --- | --- | --- |
+| `Heap` | `cppgc::Heap`（young generation 是 V8 的 `Heap` 的 scavenger） | 一個 heap：`HeapOptions::driven` 的由 JS engine 推進 old 的 marking（`start_marking`、`advance_marking`、`finish_marking`，下面的「和 JS engine 一起標記」），`used_bytes` 是 engine 要知道的大小；`mutate` 跑一個操作（開始前是安全點），`read` 跑一個不配置的操作（不經過安全點，借共享的 `&Heap`：這種操作可以一個在另一個裡面，不會和 GC 重疊），`collect` 在安全點做 full GC（正在 concurrent marking 的話先收掉它；driven 的 heap 不行：它的 full GC 是 engine 的），`scavenge` 只收 nursery，`is_marking` 是不是正在 concurrent marking，`is_sweeping` 是不是上一次 full GC 的 sweep 還在背景跑，`stats`（含上一次 full GC 的 `GcRecord`：停頓和 mark、sweep、finalize 各自的時間，標到的物件和 bytes，worker 掃了幾個，是不是 concurrent 的、它開始的停頓、收尾的停頓裡標了幾個、engine 推進的步驟裡 heap 的 thread 標了幾個；concurrent marking 做完的次數、其中撞到門檻收尾的次數、worker 在背景標的時間合計；worker 在背景 sweep 的時間、heap 的 thread 在停頓外 sweep 的時間和頁數；上一次 scavenge 的 `ScavengeRecord`：時間，留在 nursery 和升到 old 的物件和 bytes，跑了幾個 finalizer）、`roots`。`HeapOptions::nursery_bytes` 是 nursery 一開始的大小（預設 1 MiB，0 是沒有 nursery），`max_nursery_bytes` 是它最多長到多大（預設 16 MiB），`HeapStats::nursery_bytes` 是現在的大小 |
+| `Mutation<'gc>` | `AllocationHandle` | 一個操作：`alloc` 配置物件，`alloc_in` 從一個 site 配置，讀寫邊都要它；`new_id` 給物件一個 id、`by_id::<T>` 用 id 找它（id 表）；`pretenured` 裡的配置直接放 old（V8 的 `AllocationType::kOld`），給呼叫的人知道會活很久的物件（例如 parser 建的初始文件） |
+| `Site`、`SiteStats`、`PretenureDecision` | V8 的 `AllocationSite` | 一個配置的地方，在那裡宣告（`static SITE: Site = Site::new();`，`cx.alloc_in(&SITE, ..)`），或執行時建了 leak 掉（不是程式裡的地方的，例如重播的錄到的型別）；每個 heap 各自數、各自決定要不要把它的物件直接放 old，`Heap::site` 看它的計數和決定。一個 process 最多 65535 個 |
+| `Gc<'gc, T>` | `T*` | 操作裡的物件：raw pointer，帶著操作的 invariant lifetime，不能帶出操作 |
+| `Member<T>` | `Member<T>` | 物件裡的邊：cage 裡的 32 位元 offset，0 是 null。`[Member<T>; N]` 也可以當欄位：N 條連續的邊 |
+| `Erased` | `Member<GarbageCollectedMixin>` 這類指向多種型別的邊 | 任何型別的物件：`Member<Erased>` 的邊可以指向不同型別的物件，`Gc::erase` 把 `Gc<T>` 換成它；沒有欄位。`Gc::<Erased>::downcast::<T>` 照物件 header 的型別轉回去，不是 `T` 是 `None`（新的 DOM 的節點的「種類的資料」一格指向幾種型別） |
+| `Persistent<T>` | `Persistent<T>` | root：heap 的 root 表的一格，可以留過操作 |
+| `WeakMember<T>` | `WeakMember<T>` | weak 的邊：不留住它指的物件，物件死了之後 GC 把它清成 0（old 的物件由 full GC，young 的由 scavenge）。`get(cx)` 回 `Option<Gc>`，`set`；`[WeakMember<T>; N]` 也可以當欄位 |
+| `Id` | Blink 的 `DOMNodeId` | heap 的 id 表裡的編號：`new_id` 給，一直往上數、不重複；物件活著時 `by_id` 找得到，死了之後永遠找不到（`from_raw` 從寫下的數字讀回來，任何數字都安全）。`HeapStats::id_chunks` 是表現在的塊數 |
+| `EphemeronPair<K, V>` | `EphemeronPair<K, V>` | ephemeron：一條 weak 的 key 和一條 value，value 只在 key 活著時活著（value 指回 key 不會留住 key）。`key(cx)`、`value(cx)`（key 死了兩個都是 `None`）、`set(cx, key, value)`；`[EphemeronPair<K, V>; N]` 也可以當欄位。會長大的容器（像 Oilpan 的 weak key 的 `HeapHashMap`）之後照需要建在它上面 |
+| `Mutation::engine_address`、`from_engine` | cppgc 的物件的位址（`Object::Wrap`、`Unwrap`） | JS engine 的 wrapper 存的物件的位址：driven 的 heap 裡帶 `JsEdge` 的型別一律在 old、不搬，所以位址一直有效；`from_engine` 讀回（`unsafe`：呼叫的一方保證那是這個 heap 的活的 `T`；不在這個 heap 的 cage 裡就 panic；marking 期間經過讀取的 barrier） |
+| `WrapperMarker`、`WrapperLocal` | cppgc 的 `CppMarkingState`（給 V8 的 marking thread 用） | engine 的 marking thread 把標到的 wrapper 的物件交過來：`start_marking` 給 `WrapperMarker`，每個 thread 一個 `local`，`hand`（`unsafe`：那個位址是這個 heap 的活的物件；不在 cage 裡的不理）、`publish`（drop 時也是） |
+| `JsEdge` | `TracedReference`（cppgc 的物件裡的） | 物件指向 JS engine 的物件（節點的 wrapper）：engine 自己的參照（V8 的 `TracedReference`，8 bytes、對齊 8），在物件裡，heap 建成空的之後從不讀寫，`as_ptr` 給 engine 寫；engine 推進的 marking 掃到物件時把它的位址交給 engine。物件死了什麼都不用做（engine 已經放掉沒標到的）。`type_index::<T>()` 是型別在表裡的編號（engine 給每個型別一個 tag），`js_edges_of` 從物件的位址找出它的 JS 的邊（engine 丟掉 wrapper 時找回那一格）。沒有 engine 驅動的 heap 裡，這 8 bytes 沒人讀寫（沒有 engine，marker 不交出 JS 的邊），是 embedder 的一個 word：`embedder_word`、`set_embedder_word`（一開始是 0，跟著物件搬；在 driven 的 heap 裡 panic），wasm 文件的節點放它的 main Store 的 handle |
+| `JsEdgeSink`、`JsEdgeLocal` | V8 的 `UnifiedHeapMarkingState`（給 cppgc 的 marker 用） | engine 收 JS 的邊的地方：marker 的每個 thread 一個 local |
+| `WeakPersistent<T>` | `WeakPersistent<T>` | weak 的 root：heap 的另一張 root 表（weak 的）的一格，可以留過操作；`get(cx)` 回 `Option<Gc>`，物件死了是 `None` |
+| `External<T>`、`LocalExternal<T>` | （無：cppgc 的物件可以直接帶原生資料） | 物件裡的原生資料（`Box`、`Vec`、`Arc`……）：GC 不讀它，它的 `Drop` 是物件唯一的 finalizer。`External` 要 `T: Send`，finalizer 在 sweep 的 worker 上跑（V8 在 worker 上放 ArrayBuffer 的記憶體）；不是 `Send` 的（`Rc`、`Persistent`）放 `LocalExternal`，物件的 finalizer 在 heap 的 thread 上跑（cppgc 的都是） |
+| `LocalToken`、`TokenCell<T>` | （無：Blink 直接讀寫，靠 `DocumentLifecycle` 的 DCHECK） | 用 token 靜態地分開讀和寫的 cell（qcell 的 `TLCellOwner`、`TLCell`）：一個 thread 同時只有一個 `LocalToken`（`new` 時檢查），`get(&token)` 給借用的參照，`get_mut(&mut token)`、`replace` 寫；token 不離開它的 thread，cell 不是 `Sync`。沒有計數、沒有借用的旗標。新的 DOM 的 style 的結果放在它裡面（在 `External` 裡）：style 那一段借 token 的 `&mut` 寫，layout 借 `&` 讀 |
+| `HeapVector<T>` | `HeapVector<Member<T>>` | 會長大的邊的清單，本身是 heap 的物件；`clear` 清空、留著容量（一再重填的清單只配置一次），清掉的邊不留住東西 |
+| `HeapData` | — | 可以直接放進物件的資料：沒有指標、沒有 drop glue（數字、`bool`、`Cell`、`RefCell`、`Option`、陣列） |
+| `Platform`、`Job`、`JobDelegate`、`JobHandle` | `cppgc::Platform`、V8 的 `JobTask`、`JobDelegate`、`JobHandle` | GC 的平行工作在哪裡跑：heap 把工作交給它的 platform，`run` 是呼叫的 thread 和工作要的 worker 一起做、全部做完才返回；`post_job` 是交給 worker 在背景做、馬上返回（V8 的 `PostJob`），拿回的 `JobHandle` 可以叫醒更多 worker、`cancel`（等正在跑的返回），背景的工作看 `JobDelegate::should_yield` 讓出。`posts_jobs` 是 false 的 platform（預設）沒有背景的 worker，heap 就不做 concurrent marking。`Heap::with_platform` 指定，`Heap::new` 用 process 共用的 `ThreadPool`。GC 的階段經過它的 `trace_begin`、`trace_end` 交給 trace（`Gc.Pause` 裡面是 `Gc.Mark`（裡面清 weak 和 id 表的是 `Gc.Weak`，像 cppgc 的 `CppGC.AtomicWeak`）、`Gc.Sweep`、`Gc.Finalize`，像 cppgc 的 `CppGC.*`），預設什麼都不做 |
+| `ThreadPool`、`InlinePlatform` | — | 一組停著等工作的 worker（預設是核心數減 1 個，process 共用一組；一次 `run` 一個工作，第二個只在呼叫的 thread 上做；`post_job` 的工作在沒有 `run` 時給 worker 做，`run` 開始時它們讓出）；只在呼叫的 thread 上做的 platform（Miri、loom、shuttle 底下沒給 platform 的 heap 用它：process 共用的 pool 不會結束，Miri 會報） |
+
+## 基本用法
+
+```rust
+use std::cell::Cell;
+
+use elise::{GcObject, Heap, HeapOptions, Member, Persistent};
+
+#[derive(GcObject)]
+struct Node {
+    parent: Member<Node>,
+    id: Cell<u32>,
+}
+
+let mut heap = Heap::new(HeapOptions::default());
+let root = heap.mutate(|cx| {
+    let parent = cx.alloc(NodeInit { parent: None, id: Cell::new(1) });
+    let child = cx.alloc(NodeInit { parent: Some(parent), id: Cell::new(2) });
+    assert_eq!(child.parent.get(cx).unwrap().id.get(), 1);
+    Persistent::new(cx, child)
+});
+heap.collect();
+heap.mutate(|cx| assert_eq!(root.get(cx).parent.get(cx).unwrap().id.get(), 1));
+```
+
+## 規則
+
+- **物件是 `#[derive(GcObject)]` 的 struct**，欄位有名字、沒有泛型參數，每個欄位是 `Member`、`[Member<T>; N]`、`WeakMember`、`[WeakMember<T>; N]`、`EphemeronPair`、`[EphemeronPair<K, V>; N]`、`HeapData`、`External` 或 `LocalExternal`；放 `Box`、`Vec`、參照的編不過（放進 `External` 的不是 `Send` 也編不過，錯誤指向 `LocalExternal`），指到那個欄位。derive 產生 `{名字}Init<'gc>`：欄位一樣，`Member<T>` 換成 `Option<Gc<'gc, T>>`（`[Member<T>; N]` 換成 `[Option<Gc<'gc, T>>; N]`）；一個 crate 裡要很多個大小不同的類別時（kun 的 `gc_bench` 的重播），每個放在自己的 `const _: () = { .. };` 裡，經過 trait 的 impl 拿得到，不用一個一個取名字；`cx.alloc(Init { .. })` 直接寫進 heap，所以 `Member` 不會出現在 heap 外。
+- **物件不能實作 `Drop`**（編不過）：finalizer 只有 `External` 和 `LocalExternal` 的值的 `Drop`。兩者都要 `T: 'static`，裝不進 `Gc`，所以 finalizer 碰不到 heap（`Persistent` 是 `'static`，可以裝進 `LocalExternal`，那會讓它指的物件一直活著；它不是 `Send`，裝不進 `External`）。derive 在編譯時從欄位算出型別的 finalizer 在哪裡跑：有 `LocalExternal` 的 drop glue 是 heap 的 thread，只有 `External` 的是 sweep 的 worker（`HeapField::MAIN_THREAD_DROP`、`TypeInfo` 的 `Finalizer`）。
+- **物件只借出 `&T`**：會變的欄位用 `Cell`、`RefCell`；邊用 `Member::get`、`set`。
+- **`Gc` 不能留過操作**：要留下來的用 `Persistent`。一個操作裡不會 GC，所以 `Gc` 是 raw pointer，不用 root。
+- **兩個 heap 的東西不能混用**：`Gc` 的 lifetime 擋掉大部分；讀 `Member`、`Persistent` 時另外檢查是不是這個 heap 的，不是的話 panic。
+- 物件最大是 cage 的四分之一（1 GiB）。cage 滿了（4 GiB）時 panic：操作裡不會 GC。每個 large object 至少佔 256 KiB 的位址空間（實體記憶體只 commit 用到的），所以 cage 最多放約一萬多個。

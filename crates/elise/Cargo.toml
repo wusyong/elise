@@ -1,0 +1,40 @@
+[package]
+name = "elise"
+description = "A GC for a DOM: a heap in a 4 GiB cage with 32-bit compressed edges, collected only at safepoints between operations (V8's src/heap and cppgc)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+# No doc examples: skip rustdoc's pass in `cargo test`.
+[lib]
+doctest = false
+
+[lints]
+workspace = true
+
+[package.metadata.verus]
+verify = true
+
+[dependencies]
+elise_macros.workspace = true
+# Verus's `verus!` and its specs, erased in a plain build: `src/bits.rs` is
+# proved (`cargo verus verify -p elise`).
+vstd.workspace = true
+
+# Reserving the cage and committing its pages.
+[target.'cfg(unix)'.dependencies]
+rustix = { workspace = true, features = ["mm", "param"] }
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_System_Memory", "Win32_System_SystemInformation"] }
+
+# Their atomics, locks and threads stand in for std's to check the GC's
+# parallel code, only when built with `--cfg loom` / `--cfg shuttle`.
+[target.'cfg(loom)'.dependencies]
+loom.workspace = true
+[target.'cfg(shuttle)'.dependencies]
+shuttle.workspace = true
+
+[dev-dependencies]
+trybuild.workspace = true

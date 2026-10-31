@@ -1,0 +1,5 @@
+error[E0507]: cannot move out of dereference of `Gc<'_, Node>`
+  --> tests/ui/member_moved_out_of_its_object.rs:14:41
+   |
+14 |         let _moved = LocalExternal::new(node.parent);
+   |                                         ^^^^^^^^^^^ move occurs because value has type `Member<Node>`, which does not implement the `Copy` trait

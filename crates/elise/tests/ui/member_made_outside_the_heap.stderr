@@ -1,0 +1,5 @@
+error[E0599]: no associated function or constant named `default` found for struct `Member<T>` in the current scope
+  --> tests/ui/member_made_outside_the_heap.rs:12:41
+   |
+12 |     let _member: Member<Leaf> = Member::default();
+   |                                         ^^^^^^^ associated function or constant not found in `Member<_>`

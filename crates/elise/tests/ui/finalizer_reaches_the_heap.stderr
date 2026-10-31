@@ -1,0 +1,18 @@
+error[E0521]: borrowed data escapes outside of closure
+  --> tests/ui/finalizer_reaches_the_heap.rs:28:23
+   |
+26 |     heap.mutate(|cx| {
+   |                  --
+   |                  |
+   |                  `cx` is a reference that is only valid in the closure body
+   |                  has type `&Mutation<'1>`
+27 |         let leaf = cx.alloc(LeafInit { value: Cell::new(1) });
+28 |         let _holder = LocalExternal::new(Holder { leaf });
+   |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |                       |
+   |                       `cx` escapes the closure body here
+   |                       argument requires that `'1` must outlive `'static`
+   |
+   = note: requirement occurs because of the type `Holder<'_>`, which makes the generic argument `'_` invariant
+   = note: the struct `Holder<'gc>` is invariant over the parameter `'gc`
+   = help: see <https://doc.rust-lang.org/nomicon/subtyping.html> for more information about variance

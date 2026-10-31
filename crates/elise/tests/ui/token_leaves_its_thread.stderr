@@ -1,0 +1,66 @@
+error[E0277]: `*const ()` cannot be sent between threads safely
+ --> tests/ui/token_leaves_its_thread.rs:7:24
+  |
+7 |     std::thread::spawn(move || drop(token));
+  |     ------------------ -------^^^^^^^^^^^^
+  |     |                  |
+  |     |                  `*const ()` cannot be sent between threads safely
+  |     |                  within this `{closure@$DIR/tests/ui/token_leaves_its_thread.rs:7:24: 7:31}`
+  |     required by a bound introduced by this call
+  |
+  = help: within `{closure@$DIR/tests/ui/token_leaves_its_thread.rs:7:24: 7:31}`, the trait `Send` is not implemented for `*const ()`
+note: required because it appears within the type `PhantomData<*const ()>`
+ --> $RUST/core/src/marker.rs
+  |
+  | pub struct PhantomData<T: PointeeSized>;
+  |            ^^^^^^^^^^^
+note: required because it appears within the type `LocalToken`
+ --> src/token.rs
+  |
+  | pub struct LocalToken {
+  |            ^^^^^^^^^^
+note: required because it's used within this closure
+ --> tests/ui/token_leaves_its_thread.rs:7:24
+  |
+7 |     std::thread::spawn(move || drop(token));
+  |                        ^^^^^^^
+note: required by a bound in `spawn`
+ --> $RUST/std/src/thread/functions.rs
+  |
+  | pub fn spawn<F, T>(f: F) -> JoinHandle<T>
+  |        ----- required by a bound in this function
+...
+  |     F: Send + 'static,
+  |        ^^^^ required by this bound in `spawn`
+
+error[E0277]: `UnsafeCell<i32>` cannot be shared between threads safely
+  --> tests/ui/token_leaves_its_thread.rs:10:21
+   |
+10 |           scope.spawn(|| {
+   |  _______________-----_^
+   | |               |
+   | |               required by a bound introduced by this call
+11 | |             let _ = &cell;
+12 | |         });
+   | |_________^ `UnsafeCell<i32>` cannot be shared between threads safely
+   |
+   = help: within `TokenCell<i32>`, the trait `Sync` is not implemented for `UnsafeCell<i32>`
+note: required because it appears within the type `TokenCell<i32>`
+  --> src/token.rs
+   |
+   | pub struct TokenCell<T> {
+   |            ^^^^^^^^^
+   = note: required for `&TokenCell<i32>` to implement `Send`
+note: required because it's used within this closure
+  --> tests/ui/token_leaves_its_thread.rs:10:21
+   |
+10 |         scope.spawn(|| {
+   |                     ^^
+note: required by a bound in `Scope::<'scope, 'env>::spawn`
+  --> $RUST/std/src/thread/scoped.rs
+   |
+   |     pub fn spawn<F, T>(&'scope self, f: F) -> ScopedJoinHandle<'scope, T>
+   |            ----- required by a bound in this associated function
+   |     where
+   |         F: FnOnce() -> T + Send + 'scope,
+   |                            ^^^^ required by this bound in `Scope::<'scope, 'env>::spawn`

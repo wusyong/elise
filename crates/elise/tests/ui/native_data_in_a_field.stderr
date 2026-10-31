@@ -1,0 +1,466 @@
+error[E0277]: `Box<u32>` can't be a field of a GC object
+ --> tests/ui/native_data_in_a_field.rs:7:12
+  |
+7 |     value: Box<u32>,
+  |            ^^^ not a `Member`, plain data, an `External` or a `LocalExternal`
+  |
+  = help: the trait `HeapData` is not implemented for `Box<u32>`
+  = note: native data (a `Box`, a `Vec`, an `Arc`, a reference) goes in an `External` if it is `Send`, else in a `LocalExternal`
+  = help: the following other types implement trait `HeapData`:
+            ()
+            Cell<T>
+            Option<T>
+            PhantomData<T>
+            RefCell<T>
+            [T; N]
+            bool
+            char
+          and $N others
+  = note: required for `Box<u32>` to implement `HeapField`
+
+error[E0277]: `Box<u32>` can't be a field of a GC object
+ --> tests/ui/native_data_in_a_field.rs:5:10
+  |
+5 | #[derive(GcObject)]
+  |          ^^^^^^^^ not a `Member`, plain data, an `External` or a `LocalExternal`
+  |
+  = help: the trait `HeapData` is not implemented for `Box<u32>`
+  = note: native data (a `Box`, a `Vec`, an `Arc`, a reference) goes in an `External` if it is `Send`, else in a `LocalExternal`
+  = help: the following other types implement trait `HeapData`:
+            ()
+            Cell<T>
+            Option<T>
+            PhantomData<T>
+            RefCell<T>
+            [T; N]
+            bool
+            char
+          and $N others
+  = note: required for `Box<u32>` to implement `HeapField`
+note: required because it appears within the type `BoxedInit<'gc>`
+ --> tests/ui/native_data_in_a_field.rs:5:10
+  |
+5 | #[derive(GcObject)]
+  |          ^^^^^^^^
+note: required by a bound in `elise::GcObject::Init`
+ --> src/lib.rs
+  |
+  |     type Init<'gc>;
+  |     ^^^^^^^^^^^^^^^ required by this bound in `GcObject::Init`
+  = note: this error originates in the derive macro `GcObject` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: `Box<u32>` can't be a field of a GC object
+ --> tests/ui/native_data_in_a_field.rs:5:10
+  |
+5 | #[derive(GcObject)]
+  |          ^^^^^^^^ not a `Member`, plain data, an `External` or a `LocalExternal`
+  |
+  = help: the trait `HeapData` is not implemented for `Box<u32>`
+  = note: native data (a `Box`, a `Vec`, an `Arc`, a reference) goes in an `External` if it is `Send`, else in a `LocalExternal`
+  = help: the following other types implement trait `HeapData`:
+            ()
+            Cell<T>
+            Option<T>
+            PhantomData<T>
+            RefCell<T>
+            [T; N]
+            bool
+            char
+          and $N others
+  = note: required for `Box<u32>` to implement `HeapField`
+note: required because it appears within the type `BoxedInit<'gc>`
+ --> tests/ui/native_data_in_a_field.rs:5:10
+  |
+5 | #[derive(GcObject)]
+  |          ^^^^^^^^
+note: required by a bound in `ObjectInit`
+ --> src/lib.rs
+  |
+  | / pub trait ObjectInit<'gc> {
+  | |     type Object: GcObject<Init<'gc> = Self>;
+  | | }
+  | |_^ required by this bound in `ObjectInit`
+  = note: this error originates in the derive macro `GcObject` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: `Vec<u32>` can't be a field of a GC object
+  --> tests/ui/native_data_in_a_field.rs:12:13
+   |
+12 |     values: Vec<u32>,
+   |             ^^^ not a `Member`, plain data, an `External` or a `LocalExternal`
+   |
+   = help: the trait `HeapData` is not implemented for `Vec<u32>`
+   = note: native data (a `Box`, a `Vec`, an `Arc`, a reference) goes in an `External` if it is `Send`, else in a `LocalExternal`
+   = help: the following other types implement trait `HeapData`:
+             ()
+             Cell<T>
+             Option<T>
+             PhantomData<T>
+             RefCell<T>
+             [T; N]
+             bool
+             char
+           and $N others
+   = note: required for `Vec<u32>` to implement `HeapField`
+
+error[E0277]: `Vec<u32>` can't be a field of a GC object
+  --> tests/ui/native_data_in_a_field.rs:10:10
+   |
+10 | #[derive(GcObject)]
+   |          ^^^^^^^^ not a `Member`, plain data, an `External` or a `LocalExternal`
+   |
+   = help: the trait `HeapData` is not implemented for `Vec<u32>`
+   = note: native data (a `Box`, a `Vec`, an `Arc`, a reference) goes in an `External` if it is `Send`, else in a `LocalExternal`
+   = help: the following other types implement trait `HeapData`:
+             ()
+             Cell<T>
+             Option<T>
+             PhantomData<T>
+             RefCell<T>
+             [T; N]
+             bool
+             char
+           and $N others
+   = note: required for `Vec<u32>` to implement `HeapField`
+note: required because it appears within the type `ListedInit<'gc>`
+  --> tests/ui/native_data_in_a_field.rs:10:10
+   |
+10 | #[derive(GcObject)]
+   |          ^^^^^^^^
+note: required by a bound in `elise::GcObject::Init`
+  --> src/lib.rs
+   |
+   |     type Init<'gc>;
+   |     ^^^^^^^^^^^^^^^ required by this bound in `GcObject::Init`
+   = note: this error originates in the derive macro `GcObject` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: `Vec<u32>` can't be a field of a GC object
+  --> tests/ui/native_data_in_a_field.rs:10:10
+   |
+10 | #[derive(GcObject)]
+   |          ^^^^^^^^ not a `Member`, plain data, an `External` or a `LocalExternal`
+   |
+   = help: the trait `HeapData` is not implemented for `Vec<u32>`
+   = note: native data (a `Box`, a `Vec`, an `Arc`, a reference) goes in an `External` if it is `Send`, else in a `LocalExternal`
+   = help: the following other types implement trait `HeapData`:
+             ()
+             Cell<T>
+             Option<T>
+             PhantomData<T>
+             RefCell<T>
+             [T; N]
+             bool
+             char
+           and $N others
+   = note: required for `Vec<u32>` to implement `HeapField`
+note: required because it appears within the type `ListedInit<'gc>`
+  --> tests/ui/native_data_in_a_field.rs:10:10
+   |
+10 | #[derive(GcObject)]
+   |          ^^^^^^^^
+note: required by a bound in `ObjectInit`
+  --> src/lib.rs
+   |
+   | / pub trait ObjectInit<'gc> {
+   | |     type Object: GcObject<Init<'gc> = Self>;
+   | | }
+   | |_^ required by this bound in `ObjectInit`
+   = note: this error originates in the derive macro `GcObject` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: `&'static u32` can't be a field of a GC object
+  --> tests/ui/native_data_in_a_field.rs:17:12
+   |
+17 |     value: &'static u32,
+   |            ^ not a `Member`, plain data, an `External` or a `LocalExternal`
+   |
+   = help: the trait `HeapData` is not implemented for `&'static u32`
+   = note: native data (a `Box`, a `Vec`, an `Arc`, a reference) goes in an `External` if it is `Send`, else in a `LocalExternal`
+help: the trait `HeapData` is implemented for `u32`
+  --> src/data.rs
+   |
+   |           $( unsafe impl HeapData for $ty {} )*
+   |              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+   | / plain!(
+   | |     u8,
+   | |     u16,
+   | |     u32,
+...  |
+   | |     ()
+   | | );
+   | |_- in this macro invocation
+   = note: required for `&'static u32` to implement `HeapField`
+   = note: this error originates in the macro `plain` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: `&'static u32` can't be a field of a GC object
+  --> tests/ui/native_data_in_a_field.rs:15:10
+   |
+15 | #[derive(GcObject)]
+   |          ^^^^^^^^ not a `Member`, plain data, an `External` or a `LocalExternal`
+   |
+   = help: the trait `HeapData` is not implemented for `&'static u32`
+   = note: native data (a `Box`, a `Vec`, an `Arc`, a reference) goes in an `External` if it is `Send`, else in a `LocalExternal`
+help: the trait `HeapData` is implemented for `u32`
+  --> src/data.rs
+   |
+   |           $( unsafe impl HeapData for $ty {} )*
+   |              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+   | / plain!(
+   | |     u8,
+   | |     u16,
+   | |     u32,
+...  |
+   | |     ()
+   | | );
+   | |_- in this macro invocation
+   = note: required for `&'static u32` to implement `HeapField`
+note: required because it appears within the type `BorrowedInit<'gc>`
+  --> tests/ui/native_data_in_a_field.rs:15:10
+   |
+15 | #[derive(GcObject)]
+   |          ^^^^^^^^
+note: required by a bound in `elise::GcObject::Init`
+  --> src/lib.rs
+   |
+   |     type Init<'gc>;
+   |     ^^^^^^^^^^^^^^^ required by this bound in `GcObject::Init`
+   = note: this error originates in the derive macro `GcObject` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: `&'static u32` can't be a field of a GC object
+  --> tests/ui/native_data_in_a_field.rs:15:10
+   |
+15 | #[derive(GcObject)]
+   |          ^^^^^^^^ not a `Member`, plain data, an `External` or a `LocalExternal`
+   |
+   = help: the trait `HeapData` is not implemented for `&'static u32`
+   = note: native data (a `Box`, a `Vec`, an `Arc`, a reference) goes in an `External` if it is `Send`, else in a `LocalExternal`
+help: the trait `HeapData` is implemented for `u32`
+  --> src/data.rs
+   |
+   |           $( unsafe impl HeapData for $ty {} )*
+   |              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+   | / plain!(
+   | |     u8,
+   | |     u16,
+   | |     u32,
+...  |
+   | |     ()
+   | | );
+   | |_- in this macro invocation
+   = note: required for `&'static u32` to implement `HeapField`
+note: required because it appears within the type `BorrowedInit<'gc>`
+  --> tests/ui/native_data_in_a_field.rs:15:10
+   |
+15 | #[derive(GcObject)]
+   |          ^^^^^^^^
+note: required by a bound in `ObjectInit`
+  --> src/lib.rs
+   |
+   | / pub trait ObjectInit<'gc> {
+   | |     type Object: GcObject<Init<'gc> = Self>;
+   | | }
+   | |_^ required by this bound in `ObjectInit`
+   = note: this error originates in the derive macro `GcObject` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: `Box<u32>` can't be a field of a GC object
+ --> tests/ui/native_data_in_a_field.rs:7:12
+  |
+7 |     value: Box<u32>,
+  |            ^^^^^^^^ not a `Member`, plain data, an `External` or a `LocalExternal`
+  |
+  = help: the trait `HeapData` is not implemented for `Box<u32>`
+  = note: native data (a `Box`, a `Vec`, an `Arc`, a reference) goes in an `External` if it is `Send`, else in a `LocalExternal`
+  = help: the following other types implement trait `HeapData`:
+            ()
+            Cell<T>
+            Option<T>
+            PhantomData<T>
+            RefCell<T>
+            [T; N]
+            bool
+            char
+          and $N others
+  = note: required for `Box<u32>` to implement `HeapField`
+
+error[E0277]: `Box<u32>` can't be a field of a GC object
+ --> tests/ui/native_data_in_a_field.rs:5:10
+  |
+5 | #[derive(GcObject)]
+  |          ^^^^^^^^ not a `Member`, plain data, an `External` or a `LocalExternal`
+  |
+  = help: the trait `HeapData` is not implemented for `Box<u32>`
+  = note: native data (a `Box`, a `Vec`, an `Arc`, a reference) goes in an `External` if it is `Send`, else in a `LocalExternal`
+  = help: the following other types implement trait `HeapData`:
+            ()
+            Cell<T>
+            Option<T>
+            PhantomData<T>
+            RefCell<T>
+            [T; N]
+            bool
+            char
+          and $N others
+  = note: required for `Box<u32>` to implement `HeapField`
+note: required because it appears within the type `BoxedInit<'gc>`
+ --> tests/ui/native_data_in_a_field.rs:5:10
+  |
+5 | #[derive(GcObject)]
+  |          ^^^^^^^^
+  = note: this error originates in the derive macro `GcObject` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: `Box<u32>` can't be a field of a GC object
+ --> tests/ui/native_data_in_a_field.rs:7:5
+  |
+7 |     value: Box<u32>,
+  |     ^^^^^ not a `Member`, plain data, an `External` or a `LocalExternal`
+  |
+  = help: the trait `HeapData` is not implemented for `Box<u32>`
+  = note: native data (a `Box`, a `Vec`, an `Arc`, a reference) goes in an `External` if it is `Send`, else in a `LocalExternal`
+  = help: the following other types implement trait `HeapData`:
+            ()
+            Cell<T>
+            Option<T>
+            PhantomData<T>
+            RefCell<T>
+            [T; N]
+            bool
+            char
+          and $N others
+  = note: required for `Box<u32>` to implement `HeapField`
+
+error[E0277]: `Vec<u32>` can't be a field of a GC object
+  --> tests/ui/native_data_in_a_field.rs:12:13
+   |
+12 |     values: Vec<u32>,
+   |             ^^^^^^^^ not a `Member`, plain data, an `External` or a `LocalExternal`
+   |
+   = help: the trait `HeapData` is not implemented for `Vec<u32>`
+   = note: native data (a `Box`, a `Vec`, an `Arc`, a reference) goes in an `External` if it is `Send`, else in a `LocalExternal`
+   = help: the following other types implement trait `HeapData`:
+             ()
+             Cell<T>
+             Option<T>
+             PhantomData<T>
+             RefCell<T>
+             [T; N]
+             bool
+             char
+           and $N others
+   = note: required for `Vec<u32>` to implement `HeapField`
+
+error[E0277]: `Vec<u32>` can't be a field of a GC object
+  --> tests/ui/native_data_in_a_field.rs:10:10
+   |
+10 | #[derive(GcObject)]
+   |          ^^^^^^^^ not a `Member`, plain data, an `External` or a `LocalExternal`
+   |
+   = help: the trait `HeapData` is not implemented for `Vec<u32>`
+   = note: native data (a `Box`, a `Vec`, an `Arc`, a reference) goes in an `External` if it is `Send`, else in a `LocalExternal`
+   = help: the following other types implement trait `HeapData`:
+             ()
+             Cell<T>
+             Option<T>
+             PhantomData<T>
+             RefCell<T>
+             [T; N]
+             bool
+             char
+           and $N others
+   = note: required for `Vec<u32>` to implement `HeapField`
+note: required because it appears within the type `ListedInit<'gc>`
+  --> tests/ui/native_data_in_a_field.rs:10:10
+   |
+10 | #[derive(GcObject)]
+   |          ^^^^^^^^
+   = note: this error originates in the derive macro `GcObject` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: `Vec<u32>` can't be a field of a GC object
+  --> tests/ui/native_data_in_a_field.rs:12:5
+   |
+12 |     values: Vec<u32>,
+   |     ^^^^^^ not a `Member`, plain data, an `External` or a `LocalExternal`
+   |
+   = help: the trait `HeapData` is not implemented for `Vec<u32>`
+   = note: native data (a `Box`, a `Vec`, an `Arc`, a reference) goes in an `External` if it is `Send`, else in a `LocalExternal`
+   = help: the following other types implement trait `HeapData`:
+             ()
+             Cell<T>
+             Option<T>
+             PhantomData<T>
+             RefCell<T>
+             [T; N]
+             bool
+             char
+           and $N others
+   = note: required for `Vec<u32>` to implement `HeapField`
+
+error[E0277]: `&'static u32` can't be a field of a GC object
+  --> tests/ui/native_data_in_a_field.rs:17:12
+   |
+17 |     value: &'static u32,
+   |            ^^^^^^^^^^^^ not a `Member`, plain data, an `External` or a `LocalExternal`
+   |
+   = help: the trait `HeapData` is not implemented for `&'static u32`
+   = note: native data (a `Box`, a `Vec`, an `Arc`, a reference) goes in an `External` if it is `Send`, else in a `LocalExternal`
+   = note: required for `&'static u32` to implement `HeapField`
+help: consider removing the leading `&`-reference
+   |
+17 -     value: &'static u32,
+17 +     value: u32,
+   |
+
+error[E0277]: `&'static u32` can't be a field of a GC object
+  --> tests/ui/native_data_in_a_field.rs:15:10
+   |
+15 | #[derive(GcObject)]
+   |          ^^^^^^^^ not a `Member`, plain data, an `External` or a `LocalExternal`
+   |
+   = help: the trait `HeapData` is not implemented for `&'static u32`
+   = note: native data (a `Box`, a `Vec`, an `Arc`, a reference) goes in an `External` if it is `Send`, else in a `LocalExternal`
+help: the trait `HeapData` is implemented for `u32`
+  --> src/data.rs
+   |
+   |           $( unsafe impl HeapData for $ty {} )*
+   |              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+   | / plain!(
+   | |     u8,
+   | |     u16,
+   | |     u32,
+...  |
+   | |     ()
+   | | );
+   | |_- in this macro invocation
+   = note: required for `&'static u32` to implement `HeapField`
+note: required because it appears within the type `BorrowedInit<'gc>`
+  --> tests/ui/native_data_in_a_field.rs:15:10
+   |
+15 | #[derive(GcObject)]
+   |          ^^^^^^^^
+   = note: this error originates in the derive macro `GcObject` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: `&'static u32` can't be a field of a GC object
+  --> tests/ui/native_data_in_a_field.rs:17:5
+   |
+17 |     value: &'static u32,
+   |     ^^^^^ not a `Member`, plain data, an `External` or a `LocalExternal`
+   |
+   = help: the trait `HeapData` is not implemented for `&'static u32`
+   = note: native data (a `Box`, a `Vec`, an `Arc`, a reference) goes in an `External` if it is `Send`, else in a `LocalExternal`
+help: the trait `HeapData` is implemented for `u32`
+  --> src/data.rs
+   |
+   |           $( unsafe impl HeapData for $ty {} )*
+   |              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+   | / plain!(
+   | |     u8,
+   | |     u16,
+   | |     u32,
+...  |
+   | |     ()
+   | | );
+   | |_- in this macro invocation
+   = note: required for `&'static u32` to implement `HeapField`
+   = note: this error originates in the macro `plain` (in Nightly builds, run with -Z macro-backtrace for more info)

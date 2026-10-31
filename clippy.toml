@@ -1,0 +1,3 @@
+disallowed-methods = [
+    { path = "std::sync::atomic::Atomic::fetch_add", reason = "wraps silently: checked, or #[expect] why wrapping is fine" },
+]

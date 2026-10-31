@@ -1,0 +1,13 @@
+error[E0521]: borrowed data escapes outside of closure
+  --> tests/ui/gc_kept_past_its_operation.rs:14:22
+   |
+13 |     let mut kept = None;
+   |         -------- `kept` declared here, outside of the closure body
+14 |     heap.mutate(|cx| kept = Some(cx.alloc(LeafInit { value: Cell::new(1) })));
+   |                  --  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `cx` escapes the closure body here
+   |                  |
+   |                  `cx` is a reference that is only valid in the closure body
+   |
+   = note: requirement occurs because of the type `Gc<'_, Leaf>`, which makes the generic argument `'_` invariant
+   = note: the struct `Gc<'gc, T>` is invariant over the parameter `'gc`
+   = help: see <https://doc.rust-lang.org/nomicon/subtyping.html> for more information about variance

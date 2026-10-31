@@ -1,0 +1,138 @@
+error[E0277]: `Rc<u32>` cannot be sent between threads safely
+  --> tests/ui/external_needs_send.rs:10:13
+   |
+10 |     shared: External<Rc<u32>>,
+   |             ^^^^^^^^^^^^^^^^^ `Rc<u32>` cannot be sent between threads safely
+   |
+   = help: the trait `Send` is not implemented for `Rc<u32>`
+note: required by a bound in `External`
+  --> src/external.rs
+   |
+   | pub struct External<T: Send + 'static> {
+   |                        ^^^^ required by this bound in `External`
+
+error[E0277]: `External<Rc<u32>>` can't be a field of a GC object
+  --> tests/ui/external_needs_send.rs:10:13
+   |
+10 |     shared: External<Rc<u32>>,
+   |             ^^^^^^^^ not a `Member`, plain data, an `External` or a `LocalExternal`
+   |
+   = help: the trait `HeapField` is not implemented for `External<Rc<u32>>`
+   = note: native data (a `Box`, a `Vec`, an `Arc`, a reference) goes in an `External` if it is `Send`, else in a `LocalExternal`
+help: the trait `HeapField` is conditionally implemented for `External<T>`
+  --> src/external.rs
+   |
+   | unsafe impl<T: Send + 'static> HeapField for External<T> {
+   | ^^^^^^^^^^^^^^^----^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |                |
+   |                unsatisfied requirement introduced here: `Rc<u32>: Send`
+
+error[E0277]: `External<Rc<u32>>` can't be a field of a GC object
+ --> tests/ui/external_needs_send.rs:8:10
+  |
+8 | #[derive(GcObject)]
+  |          ^^^^^^^^ not a `Member`, plain data, an `External` or a `LocalExternal`
+  |
+  = help: within `NodeInit<'gc>`, the trait `HeapField` is not implemented for `External<Rc<u32>>`
+  = note: native data (a `Box`, a `Vec`, an `Arc`, a reference) goes in an `External` if it is `Send`, else in a `LocalExternal`
+help: the trait `HeapField` is conditionally implemented for `External<T>`
+ --> src/external.rs
+  |
+  | unsafe impl<T: Send + 'static> HeapField for External<T> {
+  | ^^^^^^^^^^^^^^^----^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |                |
+  |                unsatisfied requirement introduced here: `Rc<u32>: Send`
+note: required because it appears within the type `NodeInit<'gc>`
+ --> tests/ui/external_needs_send.rs:8:10
+  |
+8 | #[derive(GcObject)]
+  |          ^^^^^^^^
+note: required by a bound in `elise::GcObject::Init`
+ --> src/lib.rs
+  |
+  |     type Init<'gc>;
+  |     ^^^^^^^^^^^^^^^ required by this bound in `GcObject::Init`
+  = note: this error originates in the derive macro `GcObject` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: `External<Rc<u32>>` can't be a field of a GC object
+ --> tests/ui/external_needs_send.rs:8:10
+  |
+8 | #[derive(GcObject)]
+  |          ^^^^^^^^ not a `Member`, plain data, an `External` or a `LocalExternal`
+  |
+  = help: within `NodeInit<'gc>`, the trait `HeapField` is not implemented for `External<Rc<u32>>`
+  = note: native data (a `Box`, a `Vec`, an `Arc`, a reference) goes in an `External` if it is `Send`, else in a `LocalExternal`
+help: the trait `HeapField` is conditionally implemented for `External<T>`
+ --> src/external.rs
+  |
+  | unsafe impl<T: Send + 'static> HeapField for External<T> {
+  | ^^^^^^^^^^^^^^^----^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |                |
+  |                unsatisfied requirement introduced here: `Rc<u32>: Send`
+note: required because it appears within the type `NodeInit<'gc>`
+ --> tests/ui/external_needs_send.rs:8:10
+  |
+8 | #[derive(GcObject)]
+  |          ^^^^^^^^
+note: required by a bound in `ObjectInit`
+ --> src/lib.rs
+  |
+  | / pub trait ObjectInit<'gc> {
+  | |     type Object: GcObject<Init<'gc> = Self>;
+  | | }
+  | |_^ required by this bound in `ObjectInit`
+  = note: this error originates in the derive macro `GcObject` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: `External<Rc<u32>>` can't be a field of a GC object
+  --> tests/ui/external_needs_send.rs:10:13
+   |
+10 |     shared: External<Rc<u32>>,
+   |             ^^^^^^^^^^^^^^^^^ not a `Member`, plain data, an `External` or a `LocalExternal`
+   |
+   = help: the trait `HeapField` is not implemented for `External<Rc<u32>>`
+   = note: native data (a `Box`, a `Vec`, an `Arc`, a reference) goes in an `External` if it is `Send`, else in a `LocalExternal`
+help: the trait `HeapField` is conditionally implemented for `External<T>`
+  --> src/external.rs
+   |
+   | unsafe impl<T: Send + 'static> HeapField for External<T> {
+   | ^^^^^^^^^^^^^^^----^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |                |
+   |                unsatisfied requirement introduced here: `Rc<u32>: Send`
+
+error[E0277]: `External<Rc<u32>>` can't be a field of a GC object
+ --> tests/ui/external_needs_send.rs:8:10
+  |
+8 | #[derive(GcObject)]
+  |          ^^^^^^^^ not a `Member`, plain data, an `External` or a `LocalExternal`
+  |
+  = help: within `NodeInit<'gc>`, the trait `HeapField` is not implemented for `External<Rc<u32>>`
+  = note: native data (a `Box`, a `Vec`, an `Arc`, a reference) goes in an `External` if it is `Send`, else in a `LocalExternal`
+help: the trait `HeapField` is conditionally implemented for `External<T>`
+ --> src/external.rs
+  |
+  | unsafe impl<T: Send + 'static> HeapField for External<T> {
+  | ^^^^^^^^^^^^^^^----^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |                |
+  |                unsatisfied requirement introduced here: `Rc<u32>: Send`
+note: required because it appears within the type `NodeInit<'gc>`
+ --> tests/ui/external_needs_send.rs:8:10
+  |
+8 | #[derive(GcObject)]
+  |          ^^^^^^^^
+  = note: this error originates in the derive macro `GcObject` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: `External<Rc<u32>>` can't be a field of a GC object
+  --> tests/ui/external_needs_send.rs:10:5
+   |
+10 |     shared: External<Rc<u32>>,
+   |     ^^^^^^ not a `Member`, plain data, an `External` or a `LocalExternal`
+   |
+   = help: the trait `HeapField` is not implemented for `External<Rc<u32>>`
+   = note: native data (a `Box`, a `Vec`, an `Arc`, a reference) goes in an `External` if it is `Send`, else in a `LocalExternal`
+help: the trait `HeapField` is conditionally implemented for `External<T>`
+  --> src/external.rs
+   |
+   | unsafe impl<T: Send + 'static> HeapField for External<T> {
+   | ^^^^^^^^^^^^^^^----^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |                |
+   |                unsatisfied requirement introduced here: `Rc<u32>: Send`

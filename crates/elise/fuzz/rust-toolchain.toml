@@ -1,0 +1,3 @@
+# cargo-fuzz needs nightly: the one Miri runs on.
+[toolchain]
+channel = "nightly-2026-10-01"
