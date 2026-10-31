@@ -1,0 +1,63 @@
+# Every push and pull request, and once a day (a new runner image or a new
+# version of a dependency can break what no commit changed): the tests on
+# each platform, the lints and the repo's checks, and loom and shuttle.
+name: CI
+
+on:
+  push:
+  pull_request:
+  schedule:
+    # 02:00 UTC every day; the slow runs are in scheduled.yml.
+    - cron: "0 2 * * *"
+  workflow_dispatch:
+
+# A newer push to the same branch makes the older run moot.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'schedule' }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      # The toolchain rust-toolchain.toml pins, with clippy and rustfmt.
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace
+
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: python3 scripts/sanity.py tests
+      - run: python3 scripts/sanity.py numerics
+
+  models:
+    name: loom and shuttle
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Each builds in a target directory of its own.
+          workspaces: |
+            . -> target/loom
+            . -> target/shuttle
+      - run: python3 scripts/test.py models

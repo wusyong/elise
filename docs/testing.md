@@ -25,6 +25,18 @@ python3 tla/unified/check.py
 
 fuzz 和 Miri 用 `crates/elise/fuzz/rust-toolchain.toml` 釘的 nightly，兩個一起升級；Verus 的版本在 `test.py` 的 `VERUS_VERSION`，和 `Cargo.toml` 釘的 `vstd` 一起升級。升級 toolchain 之後用 `TRYBUILD=overwrite cargo test -p elise --test compile_fail` 重新產生 `crates/elise/tests/ui/` 的 `.stderr`，確認錯誤的種類和位置沒變。
 
+## CI
+
+GitHub Actions，兩個 workflow：
+
+| workflow | 什麼時候 | 跑什麼 |
+| --- | --- | --- |
+| `.github/workflows/ci.yml` | 每次 push 和 pull request，加上每天 02:00 UTC | `cargo test --workspace`（Linux、macOS、Windows）；fmt、clippy、`sanity.py`；`test.py models` |
+| `.github/workflows/scheduled.yml` | 每天 03:00 UTC | `test.py fuzz --minutes 30`（corpus 用 Actions 的 cache 一次接一次累積，失敗時輸入存成 artifact）、`test.py verus`（Verus 的 release 下載一次、cache 起來）、兩個 TLA+ 的 `check.py` |
+| | 每週日 04:00 UTC | `test.py miri`，用 `--partition` 分給 6 台機器（每個 job 最多 6 小時） |
+
+`scheduled.yml` 也可以手動跑（Actions → Scheduled → Run workflow），選全部或其中一項。排程只在預設的 branch 上跑；公開的 repo 連續 60 天沒有活動時，GitHub 會停掉排程，要到 Actions 頁面重新打開。同一個 branch 的新 push 會取消還在跑的舊的那次（排程的不取消）。
+
 ## Miri
 
 `test.py miri` 跑的是
@@ -33,7 +45,7 @@ fuzz 和 Miri 用 `crates/elise/fuzz/rust-toolchain.toml` 釘的 nightly，兩�
 MIRIFLAGS="-Zmiri-strict-provenance -Zmiri-disable-isolation" cargo +nightly-2026-10-01 miri nextest run -p elise --lib --test it
 ```
 
-cargo-nextest 平行跑，每個測試一個 process（要先 `cargo install cargo-nextest`），之後再單獨跑刻意 leak 的那一個（下面）。給了 nextest 的參數（例如篩選）時只跑第一段。
+cargo-nextest 平行跑，每個測試一個 process（要先 `cargo install cargo-nextest`），之後再單獨跑刻意 leak 的那一個（下面）。給了 nextest 的參數（例如篩選）時只跑第一段。`--partition I/N` 只跑 N 份裡的第 I 份（nextest 的 `count:I/N`），讓幾台機器分著跑（CI 分成 6 份）；刻意 leak 的那一個跟著第 1 份跑。
 
 Miri 用預設的 Stacked Borrows，定期跑一次全部（不在每次改動時跑）。測試的大小照一般的 build（nursery 一頁一頁長大、large object、fuzz），在 Miri 底下最慢的一個要半小時以上，一次要一個小時以上：只在 Miri 下才編的測試（`cfg(miri)`）和在 Miri 下縮小的迴圈另外標出來，其他不為 Miri 縮小。`-Zmiri-disable-isolation` 讓它讀得到 `crates/elise/fuzz/regressions/` 的檔案（測試不依賴時間和亂數）。它報了像是誤報的錯時，才在 `MIRIFLAGS` 加上 `-Zmiri-tree-borrows` 用 Tree Borrows 確認。`heap::a_root_outliving_its_heap_is_caught` 刻意留下 heap 的 root 表（root 活得比 heap 久時的做法），Miri 的 leak 檢查會報它，所以在 Miri 下 ignore；要看它沒有 UB，單獨用 `-Zmiri-ignore-leaks` 跑（`--run-ignored all -E 'test(=heap::a_root_outliving_its_heap_is_caught)'`）。
 

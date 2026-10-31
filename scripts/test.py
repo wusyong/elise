@@ -5,7 +5,7 @@
     python scripts/test.py fuzz [--minutes N] [--seeds DIR]
                                        # the fuzzer (cargo-fuzz)
     python scripts/test.py verus       # the Verus proofs (cargo verus verify)
-    python scripts/test.py miri [NEXTEST_ARG ...]
+    python scripts/test.py miri [--partition I/N] [NEXTEST_ARG ...]
                                        # the tests under Miri (cargo-nextest)
 
 `models` builds with `--cfg loom` and `--cfg shuttle`, each in a target
@@ -151,16 +151,25 @@ def cmd_miri(args: argparse.Namespace) -> int:
     cargo-nextest (a process a test; `cargo install cargo-nextest`), on the
     nightly the fuzzer pins (`rustup +<it> component add miri`). Then the
     one test that leaks on purpose, alone, with `-Zmiri-ignore-leaks`.
-    Arguments after the command go to nextest (a filter, say), and skip the
-    second run. The whole run takes over an hour; the slowest test over
-    half of one. If Miri reports what looks like a false positive, rerun
-    with MIRIFLAGS plus `-Zmiri-tree-borrows`. Non-zero if a test fails."""
+    `--partition I/N` runs only the I-th of N shares of the tests (nextest's
+    `count:I/N`), for machines that split the run between them: the leaking
+    test goes with the first. Arguments after the command go to nextest (a
+    filter, say), and skip the second run. The whole run takes over an hour;
+    the slowest test over half of one. If Miri reports what looks like a
+    false positive, rerun with MIRIFLAGS plus `-Zmiri-tree-borrows`.
+    Non-zero if a test fails."""
     toolchain = f"+{nightly()}"
     base = ["cargo", toolchain, "miri", "nextest", "run", "-p", "elise", "--lib", "--test", "it"]
+    share = []
+    if args.partition is not None:
+        if not re.fullmatch(r"[1-9]\d*/[1-9]\d*", args.partition):
+            print(f"--partition takes I/N, as 1/4: not {args.partition}")
+            return 2
+        share = ["--partition", f"count:{args.partition}"]
     env = dict(os.environ, MIRIFLAGS=MIRIFLAGS)
-    print(f"--- {' '.join(base + args.rest)}", flush=True)
-    status = subprocess.run(base + args.rest, cwd=ROOT, env=env).returncode
-    if args.rest:
+    print(f"--- {' '.join(base + share + args.rest)}", flush=True)
+    status = subprocess.run(base + share + args.rest, cwd=ROOT, env=env).returncode
+    if args.rest or (args.partition is not None and not args.partition.startswith("1/")):
         return status
     leaking = ["--run-ignored", "all", "-E", f"test(={LEAKING_TEST})"]
     env["MIRIFLAGS"] = f"{MIRIFLAGS} -Zmiri-ignore-leaks"
@@ -190,6 +199,7 @@ def main() -> int:
     fuzz.add_argument("--seeds", metavar="DIR", help="a directory of inputs to start from, besides the corpus")
     command("verus", cmd_verus, "the Verus proofs (cargo verus verify)")
     miri = command("miri", cmd_miri, "the tests under Miri (cargo-nextest)")
+    miri.add_argument("--partition", metavar="I/N", help="only the I-th of N shares of the tests")
     miri.add_argument("rest", nargs=argparse.REMAINDER, metavar="NEXTEST_ARG", help="passed to cargo nextest")
 
     # Every command's own help, so that `test.py -h` explains each one.
