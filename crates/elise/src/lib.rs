@@ -1,4 +1,4 @@
-//! The DOM's GC (V8's `src/heap` and cppgc): a heap in a 4 GiB cage, whose
+//! The DOM's GC: a heap in a 4 GiB cage, whose
 //! edges are 32-bit offsets into it, collected only at safepoints between
 //! operations. This is the heap's core: pages of size classes, mark-sweep
 //! at a safepoint. Generations, concurrent marking and sweeping come
