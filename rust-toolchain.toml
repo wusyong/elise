@@ -1,7 +1,9 @@
 # The toolchain everything is built and tested with: the workspace's
 # `rust-version` (MSRV), so what we test is what we claim to support.
 # Raise both together, and regenerate the trybuild output
-# (`TRYBUILD=overwrite cargo test -p elise --test compile_fail`).
+# (`TRYBUILD=overwrite cargo test -p elise --test compile_fail`). rust-src
+# because rustc quotes the standard library's source in its errors only
+# when it is installed: the trybuild output is the one with the quotes.
 [toolchain]
 channel = "1.99.0"
-components = ["clippy", "rustfmt"]
+components = ["clippy", "rustfmt", "rust-src"]
