@@ -55,6 +55,7 @@ mod member;
 mod page;
 mod persistent;
 mod platform;
+pub mod raw;
 mod site;
 mod sync;
 mod token;

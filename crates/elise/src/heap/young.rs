@@ -211,18 +211,26 @@ pub(super) fn forward(header: &impl HeaderWord, copy: impl FnOnce(u32, u32) -> u
 /// The bytes of the object (or filler) at `data` whose header's words are
 /// `index` and `flags`, header included, rounded up to 8: what it took in
 /// the nursery, and what a copy takes.
-fn object_bytes(base: *mut u8, data: usize, index: u32, flags: u32) -> usize {
+///
+/// # Safety
+///
+/// `index` and `flags` are the header of an object or filler of the
+/// nursery, at `data` in the cage at `base`.
+unsafe fn object_bytes(base: *mut u8, data: usize, index: u32, flags: u32) -> usize {
     if index == FILLER {
         return flags as usize;
     }
-    let info = types::info(index);
-    let size = match info.kind() {
+    // SAFETY: as the caller promises, an object's type, which a GC may read.
+    let ty = unsafe { types::entry(index) };
+    let size = match ty.info.kind() {
         Kind::MemberArray => {
             // SAFETY: an array's capacity, in its first word.
             let capacity = unsafe { base.wrapping_add(data).cast::<u32>().read() } as usize;
             capacity.saturating_add(1).saturating_mul(4)
         }
-        Kind::Fixed => info.size() as usize,
+        Kind::Fixed => ty.info.size() as usize,
+        // SAFETY: an object of the type, its length (an array's) written.
+        Kind::Raw => unsafe { ty.raw_size(base.wrapping_add(data)) },
     };
     size.saturating_add(HEADER_BYTES)
         .checked_next_multiple_of(8)
@@ -419,7 +427,9 @@ impl Inner {
     pub(super) fn object_bytes(&self, data: usize) -> usize {
         // SAFETY: an object's (or filler's) header, in a committed page.
         let (index, flags) = unsafe { (self.header(data).read(), self.header(data).add(1).read()) };
-        object_bytes(self.cage.base(), data, index, flags)
+        // SAFETY: the header just read, of an object or filler of the
+        // nursery's.
+        unsafe { object_bytes(self.cage.base(), data, index, flags) }
     }
 
     /// A scavenge, in the trace's `Gc.Scavenge`, on the platform's threads:
@@ -568,7 +578,9 @@ impl Inner {
         // The promoted, whole now: their pages' bitmaps (finalizable, and
         // marks in debug builds).
         for (data, index, site) in promoted {
-            self.publish(data, index, site, types::info(index).finalizer());
+            // SAFETY: a copy's type, which it had.
+            let finalizer = unsafe { types::info(index) }.finalizer();
+            self.publish(data, index, site, finalizer);
         }
         // The nursery's objects with drop glue: moved, promoted (the old
         // generation's bitmap has them now) or dead.
@@ -940,7 +952,8 @@ impl Scavenging<'_> {
             unsafe { StdU64::from_ptr(self.ptr(data.saturating_sub(HEADER_BYTES)).cast::<u64>()) };
         let (mut bytes, mut promote, mut old_flags) = (0, false, 0);
         let forwarded = forward(header, |index, flags| {
-            bytes = object_bytes(self.base.0, data, index, flags);
+            // SAFETY: a from-space object's header.
+            bytes = unsafe { object_bytes(self.base.0, data, index, flags) };
             promote = self.promote_all || flags & AGED != 0;
             old_flags = flags;
             let to = if promote {
@@ -1122,7 +1135,8 @@ impl Scavenging<'_> {
                 .cast::<u32>()
                 .read()
         };
-        let ty = types::entry(index);
+        // SAFETY: a copy's type, which it had.
+        let ty = unsafe { types::entry(index) };
         match ty.info.kind() {
             Kind::Fixed => {
                 for &at in &ty.edges {
@@ -1152,6 +1166,12 @@ impl Scavenging<'_> {
                 let capacity = unsafe { self.ptr(data).cast::<u32>().read() } as usize;
                 for i in 0..capacity {
                     let at = i.saturating_add(1).saturating_mul(4);
+                    self.update(data.saturating_add(at), old, copier, local, worklist);
+                }
+            }
+            Kind::Raw => {
+                // SAFETY: a copy of an object of the type, whole.
+                for at in unsafe { ty.raw_edges(self.ptr(data)) } {
                     self.update(data.saturating_add(at), old, copier, local, worklist);
                 }
             }

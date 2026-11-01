@@ -31,6 +31,8 @@ mod model;
 pub mod ops;
 #[cfg(not(any(loom, shuttle)))]
 mod parallel;
+#[cfg(not(any(loom, shuttle)))]
+mod raw;
 #[cfg(shuttle)]
 mod shuttle;
 #[cfg(not(any(loom, shuttle)))]

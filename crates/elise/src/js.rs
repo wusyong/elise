@@ -224,7 +224,9 @@ pub unsafe fn js_edges_of(object: NonNull<u8>) -> impl Iterator<Item = NonNull<J
     // SAFETY: as the caller promises: a live object's header, whose type's
     // index is its first word, written before the object was published.
     let index = unsafe { object.as_ptr().sub(HEADER_BYTES).cast::<u32>().read() };
-    types::entry(index).js_edges.iter().map(move |&at| {
+    // SAFETY: a live object's type.
+    let ty = unsafe { types::entry(index) };
+    ty.js_edges.iter().map(move |&at| {
         // SAFETY: a field of the live object, by its type's layout.
         unsafe { object.add(at as usize).cast() }
     })

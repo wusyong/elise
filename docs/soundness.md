@@ -24,7 +24,7 @@ GC 的每一步都在安全點開始和收尾（scavenge、full GC 和 marking �
 - 配置只從空區段拿格子，空區段是 sweep 從 `marks` 找出的 0（或新的頁的全部），所以不會把有物件的格子再給出去。新的物件的欄位都由 init 寫（`MemberArray` 自己把每條邊清成 0），不依賴格子原來的內容。
 - Sweep 先清掉死物件的 `finalizable` bit、把頁整理好，才跑 finalizer：finalizer panic 時，剩下的死物件不會再被 finalize（leak），也不會 finalize 兩次。sweep 在背景跑時，有 heap 的 thread 那種（`LocalExternal`）finalizable 物件的頁和那種死掉的 large object 不交給 sweeper，由 heap 的 thread 在收尾之後的安全點照同樣的順序掃（`Inner::sweep_main_pages`）；只有 `Send` 的 finalizable 物件的頁和那種 large object 交給 job 的另一張清單，job 也是先清 bit、才跑 `Drop`；那之前這些頁沒有空區段，配置不會拿到死物件的格子。
 - concurrent marking 進行中，cursor 和 scavenge 的 copier 拿的空區段整段標黑，還沒配置的格子也有 bit；收尾時（copier 是還回頁上時）清掉每段沒用完的，之後的 sweep 才讀 bitmap。進行中讀 bitmap 的只有 marker（設 bit）和 barrier，它們不把 bit 當成「這裡有物件」：只從邊和 root 找物件。
-- 型別表的格子註冊之後不再改，指向 `&'static TypeInfo`。
+- 型別表的格子：static 型別的註冊之後不再改、永遠不釋放；embedder 執行時登記的型別（`raw`）的註冊之後只改退休的旗標，退休之後等每個當時活著的 heap 都做完一次之後才開始的 full GC 才釋放（I14）。
 - nursery 的頁上，從頁的開頭到 `top`（目前那一頁的在 cursor 裡）一個接一個是物件和空段：物件是 header 加上資料、湊到 8 bytes；空段是 scavenge 的 thread 用不完的 LAB 的尾巴（header 的型別是 `FILLER`，flags 是它的 bytes）；搶輸的 copy 也留在頁上，是一份完整、沒有邊指向它的物件。有 drop glue 的列在 nursery 的 finalizer 清單上（`publish` 時，物件寫完之後）。nursery 的頁只有兩處從頭一個一個走：scavenge 掃 to-space 的 copy（都是完整的物件）和 heap verifier（測試用）。init 寫到一半 panic 的物件會在頁上留下沒有 header 的一段，verifier 會在那裡停下；現在 safe 的 API 寫不出會 panic 的 init（上面）。
 
 **I2 邊**：物件的 `Member`、`WeakMember` 欄位，`EphemeronPair` 的 key 和 value，和 `HeapVector` 的陣列 `len` 以下的邊，是 0 或同一個 heap 裡一個活著的、型別相符的物件的 offset；陣列 `len` 以上的邊是 0。weak root 的表和 id 表的格子也一樣。weak 的邊和 weak root 不留住物件，所以它們的「活著」靠 GC 在釋放物件之前把它們清成 0（I3）；pair 的 value 只在 key 活著時被留住，key 是 0 時 value 也是 0。
@@ -58,7 +58,7 @@ GC 的每一步都在安全點開始和收尾（scavenge、full GC 和 marking �
 **I6 Finalizer 碰不到 heap**：`External<T>` 和 `LocalExternal<T>` 要 `T: 'static`，`Gc` 裝不進去；物件自己不能實作 `Drop`（derive 產生的兩個 impl 會衝突，compile-fail 測試），`HeapData` 沒有 drop glue（G2），所以物件唯一的 drop glue 是這兩種的值的。**在別的 thread 上跑的 finalizer**：只有 drop glue 全是 `External` 的值的型別（`HeapField::MAIN_THREAD_DROP` 都是 false：`HeapField` 是 `unsafe trait`，它的契約要求 drop glue 不能在別的 thread 跑的欄位標成 true；`LocalExternal` 標 true，`External` 要 `T: Send`，其他的 impl 沒有 drop glue）在 sweep 的 worker 上 finalize，所以那裡跑的 `Drop` 只碰 `Send` 的值；死物件沒有人讀（不可到達，它的頁在結果套用前 heap 的 thread 不碰），bit 先清掉再跑，只跑一次；heap 的 thread 不在操作中途跑它們（配置時自己掃的頁不含要 finalize 的）。finalizable 的 bit 在 `Marks` 裡、是 atomic 的 word：交給 worker 的頁只有它改，heap 的 thread 在套用之後才讀寫（verifier 不在那之前數它們）。Finalizer 可以拿著 `Persistent`（`'static`）並 drop 它：那只是改 root 表，finalizer 跑的時候沒有人拿著表的內容（下面的 I13）。Finalizer 拿不到 `&mut Heap`（要的話只能經過 `Rc<RefCell<Heap>>`，那會在 `borrow_mut` 時 panic）。
 
 **I7 Thread**：`Heap`、`Gc`、`Persistent` 都不是 `Send` / `Sync`（`Rc`、raw pointer：`Persistent` 拿著 root 表的 `NonNull`，表在 `UnsafeCell` 裡）。跨 thread 的有四樣：
-- **型別表**：註冊在一個 `Mutex` 底下，`TypeSlot` 的編號和表的格子用 release 寫、acquire 讀。
+- **型別表**：註冊在一個 `Mutex` 底下，`TypeSlot` 的編號和表的格子用 release 寫、acquire 讀。執行時的型別的登記、退休、釋放，編號的保留和歸還，和每個 heap 的 full GC 的計數，都在另一個 `Mutex`（`types.rs` 的 `Runtime`）底下；釋放的 `Entry` 在放掉鎖之後才 drop（embedder 的 keepalive 可能再呼叫進來），keepalive 要 `Send + Sync`：在哪個 thread 釋放不一定。
 - **Marking**：GC 在 heap 的 thread 上、`Heap::collect` 或 `mutate` 裡（`&mut Heap`，沒有 `Mutation`），把 `Marking` 交給 platform；platform 的 `run` 等所有的 worker 都返回才返回（`Job` 的契約，`ThreadPool` 照做）。期間 worker 只經過 `Base`（cage 的起點）讀物件的 header 和邊、經過頁的狀態設 mark bit；沒有任何 thread 寫 header 和邊（heap 的 thread 在 `run` 裡），所以普通的讀不是 data race。mark bit 是 atomic 的 or（relaxed）：只要求同一個 bit 只有一個 thread 看到「原本沒標」；worker 開始和結束時經過 platform 的 mutex，所以 heap 的 thread 在 `run` 之後讀得到所有的 mark bit。worklist 的段經過它的 mutex 交接。
 - **Concurrent marking**：marker（`crates/elise/src/heap/concurrent.rs` 的 `Marker`）是 `post_job` 交出去的 `Arc<dyn Job + Send>`，帶著 `Base`、mark bit 的表（`MarkTable`）、young 的表和 worklist，不借 `Inner`。它在 mutator 跑的同時：
   - **讀邊**：relaxed 地讀，背景的 run 每讀一批（16 條）做一次 acquire 的 fence。mutator 在 marking 期間先過 barrier、再 release 寫邊；marking 期間新配置的物件在被寫進任何邊之前已經寫完、mark bit 已經設上（black allocation：整段在 cursor 拿到時就設上，large object 配置時設），所以 marker 看到指向它的邊時，經過 release 和 fence 也看得到它標過，不會去掃它（loom 的模型窮舉這個順序）。marker 只掃 `mark` 回傳「原本沒標」的物件：marking 開始前就在的（開始時經過 `post_job` 的 mutex 交接，寫好的）。
@@ -110,6 +110,14 @@ GC 的每一步都在安全點開始和收尾（scavenge、full GC 和 marking �
 - 契約是 root 不活得比 heap 久。違反時不是 UB：`Heap` 的 drop 在最後（finalizer 跑完、它們拿著的 root 也放了之後）數兩張表還在用的格子，有的話把 `Shared` 留下不放（`OwnedShared::leak`），之後那些 root 的讀和 drop 寫進的還是有效的記憶體；debug build 接著 panic（unwind 中不 panic），找出放的順序錯的地方。先留下再 panic，panic 的 unwind 途中 drop 的 root 才不會碰到放掉的表。
 - 表的內容（`Entries`）在 `UnsafeCell` 裡，`RootTable` 因此不是 `Sync`，只有 heap 的 thread 碰它（`Persistent` 不是 `Send`）。每次存取經過 `with`：它的 closure 是 `RootTable` 方法自己的本體，裡面只動 `Vec`，不呼叫別人的程式（沒有 callback、不 drop 會碰表的東西），也不把參照帶出 closure，所以同一時間只有一個 `&mut Entries`，沒有重疊的借用。原本的 `in_use` 回傳借著表的迭代器、`entries_mut` 回傳 `&mut [u32]`，現在一個收集成 `Vec`、一個改成拿出來改完放回去，GC 的程式在走它們的時候 drop 了 root（今天沒有這種地方）也只是改到別的東西、或在空的表上越界 panic，不是 aliasing。
 - scavenge 照舊把格子拿出表（`take_entries`）放進 job 的 mutex，跑完放回去（I7）；那段時間 mutator 不跑，沒有 root 被建立或放掉。
+
+**I14 執行時的型別**（`crates/elise/src/raw.rs`、`crates/elise/src/types.rs` 的 `Runtime`）：embedder 執行時登記的型別的物件，GC 讀的只有 header、layout 列的邊和 array 的長度，都在物件裡；型別的 `Entry` 在 GC 還可能讀到它的物件的 header 時都還在。`raw` 有 `unsafe fn`：和 `from_engine`、`WrapperLocal::hand` 一樣，是給 embedder（wasm engine）的，它的契約由 embedder 守；safe 的部分（登記、配置、`data`、`index_of`）照樣不會造成 UB。
+- 登記時檢查 layout（`raw::check`）：大小加上 header 不超過物件的上限；邊 4-aligned、在大小以內、遞增（不重疊）；array 的長度是固定部分裡 4-aligned 的 `u32`、不是邊；元素是 1、2、4、8 或 16 bytes，固定部分對齊到它（最多 8）；元素是邊時是 4 bytes。物件的資料 8-aligned，所以每條邊都是對齊的 `AtomicU32`。`alloc_array` 的大小用 checked 算、不超過上限才配置，元素都在物件裡。
+- 配置（`raw::alloc`、`alloc_array`）先整個清成 0、寫長度，才 `publish`：每條邊是 0（I2），長度和配置的大小相符；沒有 drop glue（`Finalizer::None`），所以 sweep 和 heap 的 drop 不讀它們的型別。執行時的編號都在 `MAX_TYPES` 以上，`downcast` 不會把它們當成 Rust 的型別。
+- `unsafe` 的部分是 embedder 的契約：`write_edge`、`read_edge` 的 `at` 是物件的型別的邊（固定部分的，或長度以下的元素的），值是同一個 heap 的物件（`compress` 檢查值在 cage 裡，物件的格子也檢查在 cage 裡）；`write_edge` 經過和 `Member::set` 一樣的兩種 barrier（I3、I10）。經過 `data` 的指標寫資料時不碰邊和長度：邊只經過 atomic 寫，marker 和 mutator 同時碰的還是只有邊（I4）；長度從配置之後不改，scavenge、marker 照它算大小和元素。
+- 退休（`TypeRange::retire`，`unsafe`）的契約是之後（包括同時）不再配置這個型別，而且沒有它的物件到得了（root、weak root、邊、weak 的邊、id）。之後 GC 讀它的物件的型別只在：進行中的 marking 的快照、scavenge 經過死掉的 old 物件的 slot set 的格子 copy 它的年輕物件、heap verifier 走 nursery 的頁。退休記下每個活著的 heap 已經開始的 full GC 的次數加一，每個 heap 做完那麼多次（sweep 做完，`Inner::sweep_done` 的最後）或被 drop 之後才釋放 `Entry`：那次 full GC 在退休之後開始，它的快照到不了這些物件，開始時的 scavenge 把 nursery 清空（升上去的這些物件沒標到），它的 sweep 把它們都釋放了；之後沒有這個型別的物件，也不會再有（退休之後建的 heap 沒有，不用等）。計數在 full GC 開始時（`finish_sweeping` 之後）和 sweep 做完時、在 `Runtime` 的鎖底下改，退休在同一個鎖底下讀，所以和別的 thread 上的 GC 的先後是確定的：同時開始的那次算在退休之前，多等一次。
+- 釋放之前那一格不給別的型別（`register_raw` 在鎖底下看到不是空的就拒絕），釋放和重新登記都在鎖底下；`raw_entry` 檢查退休的旗標，只抓照順序犯的錯，同時配置的由退休的契約排除。
+- 一段編號（`TypeRange`）丟掉時，空的格子馬上還回去，退休的等釋放之後才還，還登記著的永遠不還（不是 UB：那些格子一直有效，只是浪費）。
 ## 找到並修正過的問題
 
 - **Mark 把每個欄位都當成 `u32` 讀**（原型，Miri 抓到）：一般資料的欄位可能有 padding，讀到沒初始化的位元組是 UB。改成只讀 layout 裡標成 `Member` 的欄位（I4）。
@@ -127,7 +135,7 @@ GC 的每一步都在安全點開始和收尾（scavenge、full GC 和 marking �
 - **Verus**：頁的 bitmap 搜尋（`crates/elise/src/bits.rs`）證明對任何長度的 bitmap，空區段剛好是所有最長的連續的 0、由低到高、互不相連（I1 的「配置只從空區段拿」靠它）。信任的是 Verus、Z3 和 `vstd` 的公理（例如 `u64::trailing_zeros` 的規格）。
 - **fuzz**：對著不回收的參考模型跑隨機的操作，`cfg(fuzzing)` 下空的格子和頁對 ASan 毒化，讀到死物件時當場停下（讀出的值沒被用到時，`0xdb` 的毒值看不出來）。找到的輸入縮小後由 `cargo test` 和 Miri 重播。
 - **Debug 的毒值**：sweep 把死掉的物件填上 `0xdb`，scavenge 把整頁 from-space 填上 `0xdb`，漏標或沒更新的邊在測試裡讀到的是毒值、不是舊的物件。
-- **Mutation test**：弄壞 mark、sweep、finalizer、配置、`Member`、`Persistent`、`HeapVector`、derive、write barrier、scavenge、concurrent marking（barrier、black allocation、開始和收尾、取消）、weak（layout、記下、收尾和 scavenge 的清除、兩種 barrier）、ephemeron（layout、標 value 或記下、固定點、收尾和 scavenge 的清除、barrier）和 id 表（young 的清單、清除和放掉塊、型別的比對、讀取的 barrier），確認有測試失敗；結果記在進度的文件裡。
+- **Mutation test**：弄壞 mark、sweep、finalizer、配置、`Member`、`Persistent`、`HeapVector`、derive、write barrier、scavenge、concurrent marking（barrier、black allocation、開始和收尾、取消）、weak（layout、記下、收尾和 scavenge 的清除、兩種 barrier）、ephemeron（layout、標 value 或記下、固定點、收尾和 scavenge 的清除、barrier）、id 表（young 的清單、清除和放掉塊、型別的比對、讀取的 barrier）和執行時的型別（layout 的每一條檢查、配置的清零和長度、marker、scavenge 和 verifier 走的邊、兩種 barrier、退休等的 GC 和它的計數、編號的保留和歸還），確認有測試失敗；結果記在進度的文件裡。
 
 ## 需要人工審查的地方
 
@@ -208,7 +216,14 @@ GC 的每一步都在安全點開始和收尾（scavenge、full GC 和 marking �
 
 ### `crates/elise/src/types.rs`：型別表（I7）
 
-表的格子只寫一次（在 `Mutex` 底下），之後只讀。格子指向註冊時 leak 的 `Entry`（型別的 layout 和它的邊的 offset 清單），永遠不釋放，所以 `&'static` 是對的；清單從 layout 的欄位照 `FieldKind::edges` 算出來，mark 只照它讀邊，所以它要和 layout 列的 `Member` 一樣（I4：不讀其他欄位）；weak 的清單照 `FieldKind::weak_edges`，和 layout 列的 `WeakMember` 一樣；ephemeron 的清單照 `FieldKind::ephemerons`（8 bytes 一個）。
+表的格子在鎖底下寫。static 型別的格子只寫一次，指向註冊時 leak 的 `Entry`（型別的 layout 和它的邊的 offset 清單），永遠不釋放，所以 `TypeSlot::entry` 的 `&'static` 是對的；執行時的型別的 `Entry` 會釋放：`entry`、`info` 是 `unsafe fn`，每個呼叫的地方說明它讀的是 GC 還可能讀到的物件的 header（I14），`Runtime::reclaim` 是唯一釋放的地方，在鎖底下把格子換成 null 才交出去 drop。清單從 layout 的欄位照 `FieldKind::edges` 算出來，mark 只照它讀邊，所以它要和 layout 列的 `Member` 一樣（I4：不讀其他欄位）；weak 的清單照 `FieldKind::weak_edges`，和 layout 列的 `WeakMember` 一樣；ephemeron 的清單照 `FieldKind::ephemerons`（8 bytes 一個）。
+
+### `crates/elise/src/raw.rs`：執行時的型別（I14）
+
+- `check` 的每一條都對應 I14 的一個前提（mutation test 逐條拿掉過）；layout 加新的能力時先加檢查。
+- `allocate` 先清零、寫長度，才 `publish`；`alloc_array` 的大小是 checked 的。
+- `write_edge` 只經過 `Inner::write_edge`；`edge` 檢查格子在 cage 裡。
+- 退休等的計數：`gc_started` 在每個 full GC 的開始（`Inner::collect`、`start_marking_with` 的 `finish_sweeping` 之後），`gc_finished` 在 `sweep_done` 的最後。新增開始 full GC 的路、讓 sweep 或 heap 的 drop 讀到執行時的型別（例如給它們 drop glue）、或讓 GC 在別的時候讀死物件的 header 時，要重新看 I14 的論證。
 
 ### `crates/elise/src/token.rs`：token 的 cell（I12）
 

@@ -375,7 +375,8 @@ impl Marker {
         if self.counts_bytes {
             tally.bytes = tally.bytes.saturating_add(self.marks.slot_bytes(data));
         }
-        let ty = types::entry(index);
+        // SAFETY: a live object's type.
+        let ty = unsafe { types::entry(index) };
         let mut visit = |_: usize, edge: u32| {
             let edge = edge as usize;
             if edge != 0 && (!YOUNG || !self.is_young(edge)) && self.marks.mark(edge) {
@@ -447,6 +448,12 @@ impl Marker {
                     (1..=capacity).map(|i| i.saturating_mul(4)),
                     &mut visit,
                 );
+            }
+            Kind::Raw => {
+                // SAFETY: an object of the type, its length (an array's)
+                // written before it was published, and fixed.
+                let edges = unsafe { ty.raw_edges(self.ptr(data)) };
+                self.edges::<FENCE>(data, edges, &mut visit);
             }
         }
     }

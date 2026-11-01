@@ -382,6 +382,9 @@ pub(crate) struct Inner {
     /// Under `stress`, the safepoints so far: each scavenges, or runs a full
     /// GC (or a concurrent marking's start or end), by turns.
     stress_step: Cell<u8>,
+    /// The heap's full GCs, which a retired runtime type waits on (`raw`):
+    /// dropped last, once nothing reads the heap's objects.
+    record: types::HeapRecord,
 }
 
 /// The pages: what each is, and what is free.
@@ -545,6 +548,7 @@ impl Heap {
                 markings_at_limit: Cell::new(0),
                 background_mark_ns: Cell::new(0),
                 stress_step: Cell::new(0),
+                record: types::HeapRecord::new(),
             },
         }
     }
@@ -922,7 +926,7 @@ impl<'gc> Mutation<'gc> {
             "an engine holds a driven heap's objects"
         );
         assert!(
-            !types::entry(T::__type().index()).js_edges.is_empty(),
+            !T::__type().entry().js_edges.is_empty(),
             "an object an engine holds has a JS edge"
         );
         object.as_non_null().cast()
@@ -979,7 +983,7 @@ impl<'gc> Mutation<'gc> {
         let index = ty.index();
         // An object with a JS edge is old in a heap an engine drives: the
         // engine's reference to it never moves.
-        let old = self.inner.options.driven && !types::entry(index).js_edges.is_empty();
+        let old = self.inner.options.driven && !ty.entry().js_edges.is_empty();
         let data = self.inner.allocate(ty.info().size() as usize, site, old);
         let ptr = self.inner.ptr(data).cast::<T<'gc, I>>();
         <T<'gc, I>>::__init(init, InitSlot { ptr, cx: self });
@@ -1190,10 +1194,14 @@ impl Inner {
     }
 
     /// The type of the object at `data`.
-    fn type_of(&self, data: usize) -> &'static TypeInfo {
-        // SAFETY: an object's header, in a committed page.
-        let index = unsafe { self.header(data).read() };
-        types::info(index)
+    ///
+    /// # Safety
+    ///
+    /// `data` is an object a GC may still read (`types::entry`).
+    unsafe fn type_of(&self, data: usize) -> &TypeInfo {
+        // SAFETY: an object's header, in a committed page; as the caller
+        // promises, its type's.
+        unsafe { types::info(self.header(data).read()) }
     }
 
     /// Runs the finalizer of the object at `data`.
@@ -1202,8 +1210,8 @@ impl Inner {
     ///
     /// The object is whole, has drop glue, and is finalized once.
     unsafe fn finalize(&self, data: usize) {
-        let drop = self
-            .type_of(data)
+        // SAFETY: a whole object, as the caller promises.
+        let drop = unsafe { self.type_of(data) }
             .drop_fn()
             .expect("a finalizable object has drop glue");
         // SAFETY: as the caller promises.
@@ -1356,6 +1364,7 @@ impl Inner {
         let started = Instant::now();
         platform.trace_begin("Gc.Pause");
         self.finish_sweeping(&*platform);
+        self.record.gc_started();
         // A nursery whose scavenges since the last full GC kept next to
         // nothing halves.
         self.young.get_mut().resize_at_full_gc();
@@ -1388,6 +1397,7 @@ impl Inner {
         let started = Instant::now();
         platform.trace_begin("Gc.Pause");
         self.finish_sweeping(&*platform);
+        self.record.gc_started();
         self.young.get_mut().resize_at_full_gc();
         self.scavenge(&*platform, true);
         // After the sweep (the limit) and the scavenge (what it promoted).
@@ -1924,6 +1934,8 @@ impl Inner {
         if self.verifies() {
             self.verify_space();
         }
+        // Its sweep left no dead object to read: a retired type may be freed.
+        self.record.gc_finished();
     }
 
     /// Counts the heap's thread's sweeping since `started`, `pages` swept.
@@ -2074,7 +2086,9 @@ impl Inner {
                 let live = page.sweep(&mut dead);
                 let main = dead[first..]
                     .iter()
-                    .filter(|&&data| self.type_of(data).finalizer() == Finalizer::Main)
+                    // SAFETY: a dead object with drop glue, which its page's
+                    // sweep finalizes next.
+                    .filter(|&&data| unsafe { self.type_of(data) }.finalizer() == Finalizer::Main)
                     .count();
                 page.main_objects = page.main_objects.saturating_sub(main);
                 self.applied(&mut space, number, live);
@@ -2504,6 +2518,82 @@ mod tests {
                     .cast::<u32>()
                     .write(young as u32);
             }
+        });
+        heap.inner.verify_young();
+        drop(root);
+    }
+
+    /// A runtime type of a test's: two edges, then a `u64` (`raw`).
+    fn raw_pair() -> (crate::raw::TypeRange, u32) {
+        let range = crate::raw::TypeRange::reserve(1).expect("free indices");
+        let index = range
+            .register(
+                0,
+                &crate::raw::Layout {
+                    size: 16,
+                    edges: &[0, 4],
+                    array: None,
+                },
+                Box::new(()),
+            )
+            .unwrap();
+        (range, index)
+    }
+
+    /// A heap right after a GC that kept a rooted raw pair, old, and the
+    /// `Pair` its second edge points to: the verifier is happy with it. The
+    /// raw pair's data, and the `Pair`'s.
+    fn collected_raw(index: u32) -> (Heap, Persistent<crate::Erased>, usize, usize) {
+        let mut heap = Heap::with_platform(
+            HeapOptions::default(),
+            std::sync::Arc::new(crate::InlinePlatform),
+        );
+        let root = heap.mutate(|cx| {
+            let pair = cx.alloc(PairInit {
+                next: None,
+                value: Cell::new(1),
+            });
+            let raw = crate::raw::alloc(cx, index);
+            // SAFETY: the raw pair's second edge.
+            unsafe { crate::raw::write_edge(cx, raw, 4, Some(pair.erase())) };
+            Persistent::new(cx, raw)
+        });
+        heap.collect();
+        heap.inner.verify(None);
+        let data = heap.inner.shared.roots.in_use()[0];
+        // SAFETY: the raw pair's second edge, of a whole object.
+        let pair = unsafe { heap.inner.ptr(data + 4).cast::<u32>().read() } as usize;
+        (heap, root, data, pair)
+    }
+
+    /// The verifier walks a runtime type's edges: an object only one of
+    /// them reaches, unmarked, is found.
+    #[test]
+    #[should_panic = "is reachable but unmarked"]
+    fn the_verifier_follows_a_raw_objects_edges() {
+        let (_range, index) = raw_pair();
+        let (heap, _root, _, pair) = collected_raw(index);
+        page_of(&heap, pair, |page, slot| page.unmark(slot));
+        heap.inner.verify(None);
+    }
+
+    /// An old raw object's edge to a young one written behind the barrier's
+    /// back is found after a scavenge, as a `Member`'s.
+    #[test]
+    #[should_panic = "isn't in a slot set"]
+    fn the_verifier_finds_a_raw_objects_old_edge_not_remembered() {
+        let (_range, index) = raw_pair();
+        let (mut heap, root, data, _) = collected_raw(index);
+        heap.mutate(|cx| {
+            let young = cx.alloc(PairInit {
+                next: None,
+                value: Cell::new(2),
+            });
+            let young = cx
+                .inner
+                .offset_of(young.into_ref() as *const Pair as *const u8);
+            // SAFETY: the raw pair's first edge, of a whole object.
+            unsafe { cx.inner.ptr(data).cast::<u32>().write(young as u32) };
         });
         heap.inner.verify_young();
         drop(root);

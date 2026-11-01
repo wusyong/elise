@@ -126,8 +126,10 @@ impl Inner {
             if !seen.insert(data) {
                 continue;
             }
-            // SAFETY: a reachable object's header, in a committed page.
-            let ty = types::info(unsafe { self.header(data).read() });
+            // SAFETY: a reachable object's header, in a committed page, and
+            // its type.
+            let entry = unsafe { types::entry(self.header(data).read()) };
+            let ty = &entry.info;
             let mut edge = |at: usize| {
                 // SAFETY: an edge of a whole object, by its layout.
                 let edge = unsafe { self.ptr(data).add(at).cast::<u32>().read() };
@@ -160,6 +162,8 @@ impl Inner {
                         edge(i.saturating_add(1).saturating_mul(4));
                     }
                 }
+                // SAFETY: a whole object of the type.
+                Kind::Raw => unsafe { entry.raw_edges(self.ptr(data)) }.for_each(edge),
             }
         }
         seen
@@ -233,7 +237,9 @@ impl Inner {
                 }
                 self.check_flags(data, young)
                     .map_err(|problem| format!("{problem} (reached from {from})"))?;
-                let ty = types::info(index);
+                // SAFETY: a reachable object's type.
+                let entry = unsafe { types::entry(index) };
+                let ty = &entry.info;
                 let mut edge = |at: usize, edge: u32| {
                     if edge != 0 {
                         stack.push((edge as usize, format!("{data:#x}+{at} ({})", ty.name())));
@@ -273,6 +279,13 @@ impl Inner {
                         for i in 0..capacity {
                             let at = i.saturating_add(1).saturating_mul(4);
                             // SAFETY: an edge of the array.
+                            edge(at, unsafe { self.ptr(data).add(at).cast::<u32>().read() });
+                        }
+                    }
+                    Kind::Raw => {
+                        // SAFETY: a whole object of the type.
+                        for at in unsafe { entry.raw_edges(self.ptr(data)) } {
+                            // SAFETY: an edge of the object, by its layout.
                             edge(at, unsafe { self.ptr(data).add(at).cast::<u32>().read() });
                         }
                     }
@@ -581,7 +594,7 @@ impl Inner {
         }
         // Whether `data` is the start of an object of the nursery's (not
         // forwarded): its pages' objects, one after another.
-        let young_object = |data: usize| -> Result<&'static TypeInfo, String> {
+        let young_object = |data: usize| -> Result<&TypeInfo, String> {
             let number = page::number_of(data);
             let top = tops
                 .get(&number)
@@ -604,7 +617,8 @@ impl Inner {
                     if index == 0 {
                         return Err(format!("the young object at {data:#x} has no type"));
                     }
-                    return Ok(types::info(index));
+                    // SAFETY: an object of the nursery's type.
+                    return Ok(unsafe { types::info(index) });
                 }
                 at = at.saturating_add(self.object_bytes(object));
             }
@@ -641,7 +655,9 @@ impl Inner {
             self.check_flags(data, young_host).map_err(reached)?;
             // SAFETY: a whole object (just checked), in a committed page.
             let index = unsafe { self.header(data).read() };
-            let ty = types::info(index);
+            // SAFETY: a reachable object's type.
+            let entry = unsafe { types::entry(index) };
+            let ty = &entry.info;
             let edges: Vec<usize> = match ty.kind() {
                 Kind::Fixed => ty
                     .fields()
@@ -658,6 +674,8 @@ impl Inner {
                         .map(|i| i.saturating_add(1).saturating_mul(4))
                         .collect()
                 }
+                // SAFETY: a whole object of the type.
+                Kind::Raw => unsafe { entry.raw_edges(self.ptr(data)) }.collect(),
             };
             for at in edges {
                 let slot = data.saturating_add(at);
