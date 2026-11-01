@@ -19,6 +19,16 @@ struct Node {
     drops: LocalExternal<Drops>,
 }
 
+/// A node of 480 bytes, with a finalizer too: the nursery's sizes in a
+/// twentieth of the `Node`s (24 bytes), which Miri copies and finalizes one
+/// by one, for hours.
+#[derive(GcObject)]
+struct WideNode {
+    next: Member<WideNode>,
+    drops: LocalExternal<Drops>,
+    words: [Cell<u64>; 57],
+}
+
 /// 40 000 bytes: a large object, so an old one from its allocation, with
 /// a single edge and a row of them.
 #[derive(GcObject)]
@@ -47,6 +57,18 @@ fn node<'gc>(
         next,
         value: Cell::new(value),
         drops: LocalExternal::new(Drops(drops.clone())),
+    })
+}
+
+fn wide_node<'gc>(
+    cx: &Mutation<'gc>,
+    next: Option<Gc<'gc, WideNode>>,
+    drops: &Rc<Cell<u32>>,
+) -> Gc<'gc, WideNode> {
+    cx.alloc(WideNodeInit {
+        next,
+        drops: LocalExternal::new(Drops(drops.clone())),
+        words: std::array::from_fn(|_| Cell::new(0)),
     })
 }
 
@@ -428,8 +450,8 @@ fn the_nursery_grows_with_its_survivors_and_shrinks_after_garbage() {
     let rooted_list = |heap: &mut Heap| {
         heap.mutate(|cx| {
             let mut list = None;
-            for value in 0..8000 {
-                list = Some(node(cx, value, list, &drops));
+            for _ in 0..400 {
+                list = Some(wide_node(cx, list, &drops));
             }
             Persistent::new(cx, list.unwrap())
         })
@@ -460,8 +482,8 @@ fn the_nursery_grows_with_its_survivors_and_shrinks_after_garbage() {
     for expected in [4, 2, 2] {
         for _ in 0..4 {
             heap.mutate(|cx| {
-                for value in 0..4000 {
-                    node(cx, value, None, &drops);
+                for _ in 0..200 {
+                    wide_node(cx, None, &drops);
                 }
             });
             heap.scavenge();
@@ -491,8 +513,8 @@ fn a_shrunk_nursery_counts_over() {
     for _ in 0..7 {
         roots.push(heap.mutate(|cx| {
             let mut list = None;
-            for value in 0..4000 {
-                list = Some(node(cx, value, list, &drops));
+            for _ in 0..200 {
+                list = Some(wide_node(cx, list, &drops));
             }
             Persistent::new(cx, list.unwrap())
         }));
@@ -506,8 +528,8 @@ fn a_shrunk_nursery_counts_over() {
     assert_eq!(heap.stats().nursery_bytes, 2 * PAGE);
     let garbage = |heap: &mut Heap| {
         heap.mutate(|cx| {
-            for value in 0..4000 {
-                node(cx, value, None, &drops);
+            for _ in 0..200 {
+                wide_node(cx, None, &drops);
             }
         });
         heap.scavenge();

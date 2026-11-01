@@ -47,7 +47,14 @@ MIRIFLAGS="-Zmiri-strict-provenance -Zmiri-disable-isolation" cargo +nightly-202
 
 cargo-nextest 平行跑，每個測試一個 process（要先 `cargo install cargo-nextest`），之後再單獨跑刻意 leak 的那一個（下面）。給了 nextest 的參數（例如篩選）時只跑第一段。`--partition I/N` 只跑 N 份裡的第 I 份（nextest 的 `count:I/N`），讓幾台機器分著跑（CI 分成 6 份）；刻意 leak 的那一個跟著第 1 份跑。
 
-Miri 用預設的 Stacked Borrows，定期跑一次全部（不在每次改動時跑）。測試的大小照一般的 build（nursery 一頁一頁長大、large object、fuzz），在 Miri 底下最慢的一個要半小時以上，一次要一個小時以上：只在 Miri 下才編的測試（`cfg(miri)`）和在 Miri 下縮小的迴圈另外標出來，其他不為 Miri 縮小。`-Zmiri-disable-isolation` 讓它讀得到 `crates/elise/fuzz/regressions/` 的檔案（測試不依賴時間和亂數）。它報了像是誤報的錯時，才在 `MIRIFLAGS` 加上 `-Zmiri-tree-borrows` 用 Tree Borrows 確認。`heap::a_root_outliving_its_heap_is_caught` 刻意留下 heap 的 root 表（root 活得比 heap 久時的做法），Miri 的 leak 檢查會報它，所以在 Miri 下 ignore；要看它沒有 UB，單獨用 `-Zmiri-ignore-leaks` 跑（`--run-ignored all -E 'test(=heap::a_root_outliving_its_heap_is_caught)'`）。
+Miri 用預設的 Stacked Borrows，定期跑一次全部（不在每次改動時跑）。Miri 一個物件一個物件地解譯，配置、copy 和 finalize 一個物件要好幾毫秒，所以測試在 Miri 下縮小重複的部分，但留下走過的路徑和規模的門檻（nursery 一頁一頁長大、large object、頁的重用）：
+
+- 用 bytes 判斷的測試用大的物件湊出一樣的 bytes：nursery 長大和縮小的兩個測試（`young.rs`）用 480 bytes 的 node，原生也一樣。
+- 只要 nursery 滿了、做了 scavenge 的測試（`js.rs` 的兩個），在 Miri 下用一頁的 nursery、分成小的操作，做到要的 scavenge 就停。
+- 寫好的操作（`fuzz.rs`）在 Miri 下只跑選項的 6 組組合，每兩個選項的四種組合都有（`PAIRWISE`，有測試檢查）；三個以上的選項一起的效果由原生的全部 64 組守著。
+- 依賴真實時間的檢查在 Miri 下放寬：schedule 用的 500 ms（step 的次數）、等 worker 做完的上限。
+
+在 Miri 下縮小或放寬的地方都用 `cfg!(miri)` 標出來、寫明理由。縮小之後最慢的一個（`fuzz::a_written_run_with_sites_agrees_with_the_model`）要 40 分鐘左右，縮小以前好幾個要 1 到 3 小時以上。`-Zmiri-disable-isolation` 讓它讀得到 `crates/elise/fuzz/regressions/` 的檔案，也讓它看到真的時間（上面那些檢查用到；測試不依賴亂數）。Windows 上的 Miri 不支援列出目錄，`fuzz::the_fuzzers_regressions_pass` 在那裡失敗；CI 在 Linux 上跑。它報了像是誤報的錯時，才在 `MIRIFLAGS` 加上 `-Zmiri-tree-borrows` 用 Tree Borrows 確認。`heap::a_root_outliving_its_heap_is_caught` 刻意留下 heap 的 root 表（root 活得比 heap 久時的做法），Miri 的 leak 檢查會報它，所以在 Miri 下 ignore；要看它沒有 UB，單獨用 `-Zmiri-ignore-leaks` 跑（`--run-ignored all -E 'test(=heap::a_root_outliving_its_heap_is_caught)'`）。
 
 ## loom、shuttle
 

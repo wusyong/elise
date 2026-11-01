@@ -164,9 +164,9 @@ def cmd_miri(args: argparse.Namespace) -> int:
     I-th of N shares of the tests (nextest's `count:I/N`), for machines
     that split the run between them: the leaking test goes with the
     first. Arguments after the command go to nextest (a filter, say), and
-    skip the second run. The whole run takes over an hour; the slowest
-    test over half of one. If Miri reports what looks like a false
-    positive, rerun with MIRIFLAGS plus `-Zmiri-tree-borrows`.
+    skip the second run. The slowest test takes about 40 minutes, the
+    whole run a few hours of one thread. If Miri reports what looks like a
+    false positive, rerun with MIRIFLAGS plus `-Zmiri-tree-borrows`.
     Non-zero if a test fails."""
     toolchain = f"+{nightly()}"
     base = ["cargo", toolchain, "miri", "nextest", "run", "--no-fail-fast", "-p", "elise", "--lib", "--test", "it"]

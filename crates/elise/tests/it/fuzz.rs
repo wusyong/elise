@@ -101,8 +101,56 @@ fn a_written_run_agrees_with_the_model() {
         Op::Collect,
     ];
     // And on a heap the engine drives, whose `Collect`s are its.
-    for flags in 0..64 {
+    for flags in flag_sets(0..64) {
         ops::run(&ops::encode(&options(flags), &ops));
+    }
+}
+
+/// Every two options in each of their four combinations: the six flags
+/// a written run takes under Miri, of the 64 it takes otherwise (a
+/// covering array of strength 2, as pairwise testing calls it). Miri is
+/// slow (each run a heap, over an hour for all 64), and the undefined
+/// behavior it looks for is on a path one option or two take; what three
+/// together do is tested without it.
+const PAIRWISE: [u8; 6] = [0b11_1111, 0b01_0101, 0b10_1001, 0b10_0110, 0b01_1010, 0];
+
+/// The flags of `range` a written run takes: all of them, or under Miri
+/// `PAIRWISE`'s, its options that `range` leaves free (the low ones) as
+/// those rows have them, and the others as `range.start`.
+fn flag_sets(range: std::ops::Range<u8>) -> Vec<u8> {
+    flag_sets_for(range, cfg!(miri))
+}
+
+fn flag_sets_for(range: std::ops::Range<u8>, miri: bool) -> Vec<u8> {
+    if !miri {
+        return range.collect();
+    }
+    let free = (range.end - 1) ^ range.start;
+    let mut flags: Vec<u8> = PAIRWISE
+        .iter()
+        .map(|row| row & free | range.start)
+        .collect();
+    flags.dedup();
+    flags
+}
+
+/// Under Miri, the written runs' flags still take every two of the options
+/// they leave free in each of their four combinations.
+#[test]
+fn the_miri_flags_take_every_pair_of_options() {
+    for range in [0..64, 0..32, 32..64] {
+        let flags = flag_sets_for(range.clone(), true);
+        assert!(flags.iter().all(|flag| range.contains(flag)), "{flags:?}");
+        let free = (range.end - 1) ^ range.start;
+        for a in (0..6).filter(|bit| free >> bit & 1 != 0) {
+            for b in (a + 1..6).filter(|bit| free >> bit & 1 != 0) {
+                let mut seen = [false; 4];
+                for flag in &flags {
+                    seen[usize::from(flag >> a & 1) * 2 + usize::from(flag >> b & 1)] = true;
+                }
+                assert!(seen.iter().all(|&s| s), "options {a} and {b}: {flags:?}");
+            }
+        }
     }
 }
 
@@ -163,7 +211,7 @@ fn a_written_run_with_sites_agrees_with_the_model() {
         Op::Root { object: 0 },
         Op::Collect,
     ]);
-    for flags in 0..32 {
+    for flags in flag_sets(0..32) {
         ops::run(&ops::encode(&options(flags), &ops));
     }
 }
@@ -233,7 +281,7 @@ fn a_written_run_with_weak_edges_agrees_with_the_model() {
         Op::WeakUnroot { root: 0 },
         Op::Collect,
     ];
-    for flags in 0..32 {
+    for flags in flag_sets(0..32) {
         ops::run(&ops::encode(&options(flags), &ops));
     }
 }
@@ -289,7 +337,7 @@ fn a_written_run_with_ephemerons_agrees_with_the_model() {
         Op::ReadPair { from: 0 },
         Op::Collect,
     ]);
-    for flags in 0..32 {
+    for flags in flag_sets(0..32) {
         ops::run(&ops::encode(&options(flags), &ops));
     }
 }
@@ -335,7 +383,7 @@ fn a_written_run_with_ids_agrees_with_the_model() {
         Op::Collect,
         Op::ById { id: 3 },
     ];
-    for flags in 0..32 {
+    for flags in flag_sets(0..32) {
         ops::run(&ops::encode(&options(flags), &ops));
     }
 }
@@ -489,7 +537,7 @@ fn a_written_driven_run_agrees_with_the_model() {
         Op::Collect,
         Op::Collect,
     ];
-    for flags in 32..64 {
+    for flags in flag_sets(32..64) {
         ops::run(&ops::encode(&options(flags), &ops));
     }
 }

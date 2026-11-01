@@ -669,10 +669,13 @@ fn the_send_finalizers_run_on_a_worker() {
             });
         });
     }
+    // Under Miri, a hundred times slower, and slower still beside other
+    // tests, minutes.
+    let limit = if cfg!(miri) { 600 } else { 10 };
     let started = std::time::Instant::now();
     while heap.is_marking() || heap.is_sweeping() {
         assert!(
-            started.elapsed().as_secs() < 10,
+            started.elapsed().as_secs() < limit,
             "the workers mark and sweep"
         );
         std::thread::sleep(std::time::Duration::from_millis(1));

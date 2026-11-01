@@ -223,12 +223,18 @@ fn a_driven_marking_ends_with_the_live_bytes() {
         )
     });
     let scavenges = heap.stats().scavenges;
-    for _ in 0..20 {
+    // Under Miri, in smaller operations, up to the second scavenge (the
+    // first copies the rooted object, the second promotes it): the
+    // allocations take it hours.
+    for _ in 0..if cfg!(miri) { 400 } else { 20 } {
         heap.mutate(|cx| {
-            for _ in 0..10_000 {
+            for _ in 0..if cfg!(miri) { 1000 } else { 10_000 } {
                 cx.alloc(PlainInit { next: None });
             }
         });
+        if cfg!(miri) && heap.stats().scavenges >= scavenges + 2 {
+            break;
+        }
     }
     assert!(
         heap.stats().scavenges > scavenges,
@@ -427,16 +433,21 @@ fn the_engine_is_told_of_the_nurserys_bytes() {
 }
 
 /// Its scavenges are its own: a full nursery is scavenged at the next
-/// safepoint, as in a heap that isn't driven.
+/// safepoint, as in a heap that isn't driven. Under Miri, a nursery of one
+/// page, filled in smaller operations up to its first scavenge: filling a
+/// megabyte's takes it hours.
 #[test]
 fn a_driven_heap_scavenges_its_full_nursery_itself() {
-    let (mut heap, _steps) = driven(1 << 20);
-    for _ in 0..50 {
+    let (mut heap, _steps) = driven(if cfg!(miri) { 1 } else { 1 << 20 });
+    for _ in 0..if cfg!(miri) { 500 } else { 50 } {
         heap.mutate(|cx| {
-            for _ in 0..10_000 {
+            for _ in 0..if cfg!(miri) { 1000 } else { 10_000 } {
                 cx.alloc(PlainInit { next: None });
             }
         });
+        if cfg!(miri) && heap.stats().scavenges > 0 {
+            break;
+        }
     }
     assert!(heap.stats().scavenges > 0);
     assert_eq!(heap.stats().gcs, 0, "no full GC of its own");
@@ -623,8 +634,12 @@ fn the_heaps_thread_marks_in_the_engines_steps() {
         assert!(steps < 1000, "marking makes progress");
     }
     // A step marks 1024 objects (64 KiB, an object 64 bytes before the
-    // first GC) after one that marked none.
-    assert!(steps > 2 * (NODES as usize / 1024) - 4, "{steps} steps");
+    // first GC) after one that marked none, while the marking is within
+    // the schedule's 500 ms. Not under Miri: it is past them by then, and
+    // a step catches up with the rest.
+    if !cfg!(miri) {
+        assert!(steps > 2 * (NODES as usize / 1024) - 4, "{steps} steps");
+    }
     finish(&mut heap);
     let record = heap.stats().last_gc;
     assert_eq!(record.marked_objects, NODES as usize);
