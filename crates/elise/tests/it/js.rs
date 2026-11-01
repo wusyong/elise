@@ -116,21 +116,25 @@ fn finish(heap: &mut Heap) {
     heap.finish_marking();
 }
 
-/// An engine's wrapper's hold on an object: its address.
+/// An engine's wrapper's hold on an object: its address, the pointer
+/// itself (its provenance kept, as Miri's strict provenance wants).
 #[derive(Clone, Copy)]
-struct Held(usize);
+struct Held(NonNull<u8>);
+
+// SAFETY: the engine's threads only pass the address back to the heap
+// (`hand`, `from_engine`, whose callers promise it is live), as V8's do;
+// none reads through it.
+unsafe impl Send for Held {}
 
 impl Held {
     fn of<'gc>(cx: &elise::Mutation<'gc>, node: elise::Gc<'gc, Node>) -> Self {
-        Self(cx.engine_address(node).as_ptr().addr())
+        Self(cx.engine_address(node))
     }
 
     fn get<'gc>(self, cx: &elise::Mutation<'gc>) -> elise::Gc<'gc, Node> {
         // SAFETY: the address `engine_address` gave of a `Node` of this
         // heap, which the test keeps alive (handed over, or no marking ran).
-        unsafe {
-            cx.from_engine(NonNull::new(std::ptr::with_exposed_provenance_mut(self.0)).unwrap())
-        }
+        unsafe { cx.from_engine(self.0) }
     }
 }
 
@@ -141,9 +145,7 @@ fn hand(marker: &elise::WrapperMarker, held: Vec<Held>) {
         let mut local = marker.local();
         for Held(address) in held {
             // SAFETY: a live `Node` of the heap marking, its wrapper's.
-            unsafe {
-                local.hand(NonNull::new(std::ptr::with_exposed_provenance_mut(address)).unwrap())
-            };
+            unsafe { local.hand(address) };
         }
     })
     .join()
@@ -551,10 +553,7 @@ fn a_marking_the_engine_drives_on_a_pool() {
             let mut local = marker.local();
             for (i, Held(address)) in handed.into_iter().enumerate() {
                 // SAFETY: a live `Node` of the heap marking.
-                unsafe {
-                    local
-                        .hand(NonNull::new(std::ptr::with_exposed_provenance_mut(address)).unwrap())
-                };
+                unsafe { local.hand(address) };
                 if i % 7 == 0 {
                     local.publish();
                 }
@@ -777,6 +776,65 @@ fn a_step_marks_the_values_of_ephemerons_whose_key_got_marked() {
     finish(&mut heap);
     let record = heap.stats().last_gc;
     assert_eq!(record.marked_objects, 2 * CHAIN as usize + 1);
+    assert_eq!(record.marked_in_pause, 0, "{record:?}");
+}
+
+/// A step whose limit runs out with the last object it has to mark (the
+/// first step's 1024 objects, cppgc's 64 KiB of 64-byte objects before the
+/// heap's first GC; a multiple of the worklist's yield check): out of
+/// segments all the same, it gives the values of the ephemerons whose key
+/// got marked to the worklist, so the marking isn't done yet. The steps
+/// mark them, not the pause.
+#[test]
+fn a_step_that_runs_out_as_it_drains_still_marks_the_ephemerons_values() {
+    #[derive(GcObject)]
+    struct Table {
+        pair: elise::EphemeronPair<Node, Node>,
+    }
+
+    // With the table, the first step's 1024 objects.
+    const KEYS: u32 = 1023;
+    const VALUES: u32 = 100;
+    let mut heap = Heap::with_platform(
+        HeapOptions {
+            driven: true,
+            nursery_bytes: 0,
+            ..crate::verified()
+        },
+        Arc::new(InlinePlatform),
+    );
+    fn chain<'gc>(cx: &elise::Mutation<'gc>, from: u32, len: u32) -> elise::Gc<'gc, Node> {
+        let mut next = None;
+        for i in 0..len {
+            next = Some(node(cx, from + i, next));
+        }
+        next.unwrap()
+    }
+    // The key at the end of a chain from one root; the table, the other
+    // root, scanned first (the last root is taken first).
+    let (_keys, _table) = heap.mutate(|cx| {
+        let keys = chain(cx, 0, KEYS);
+        let mut key = keys;
+        while let Some(next) = key.next.get(cx) {
+            key = next;
+        }
+        let table = cx.alloc(TableInit { pair: (None, None) });
+        table.pair.set(cx, Some(key), Some(chain(cx, KEYS, VALUES)));
+        (Persistent::new(cx, keys), Persistent::new(cx, table))
+    });
+    let _marker = heap.start_marking(Arc::new(Engine::default()));
+    assert!(
+        !heap.advance_marking(false, Duration::MAX),
+        "the values are yet to be marked"
+    );
+    let mut steps = 0;
+    while !heap.advance_marking(false, Duration::MAX) {
+        steps += 1;
+        assert!(steps < 1000, "marking makes progress");
+    }
+    finish(&mut heap);
+    let record = heap.stats().last_gc;
+    assert_eq!(record.marked_objects, (KEYS + VALUES + 1) as usize);
     assert_eq!(record.marked_in_pause, 0, "{record:?}");
 }
 

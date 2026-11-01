@@ -91,6 +91,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "elise"
+version = "0.2.0"
+dependencies = [
+ "elise-derive",
+ "loom",
+ "rustix",
+ "shuttle",
+ "vstd",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "elise-derive"
+version = "0.2.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
+name = "elise-fuzz"
+version = "0.0.0"
+dependencies = [
+ "elise",
+ "libfuzzer-sys",
+]
+
+[[package]]
 name = "equivalent"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -117,35 +146,6 @@ name = "funty"
 version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6d5a32815ae3f33302d95fdcb2ce17862f8c65363dcfd29360480ba1001fc9c"
-
-[[package]]
-name = "elise"
-version = "0.0.1"
-dependencies = [
- "elise-derive",
- "loom",
- "rustix",
- "shuttle",
- "vstd",
- "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "elise-fuzz"
-version = "0.0.0"
-dependencies = [
- "elise",
- "libfuzzer-sys",
-]
-
-[[package]]
-name = "elise-derive"
-version = "0.0.1"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn",
-]
 
 [[package]]
 name = "generator"

@@ -38,6 +38,12 @@ def nightly() -> str:
     return re.search(r'^channel\s*=\s*"([^"]+)"', text, re.M).group(1)
 
 
+def host() -> str:
+    """The machine's target triple, as the fuzzer's nightly names it."""
+    out = subprocess.run(["rustc", "-vV"], cwd=FUZZ, capture_output=True, text=True, check=True).stdout
+    return re.search(r"^host: (\S+)", out, re.M).group(1)
+
+
 def cmd_models(args: argparse.Namespace) -> int:
     """`elise`'s parallel code under loom and shuttle, which stand in for its
     atomics, locks and threads when it is built with `--cfg loom` or `--cfg
@@ -73,8 +79,10 @@ def cmd_fuzz(args: argparse.Namespace) -> int:
     directory's inputs too (kun's `gc_bench fuzz-seeds` makes them of its
     heap recordings). On a failure it minimizes the input and prints where
     it is: put it in crates/elise/fuzz/regressions/ with the fix, and `cargo
-    test -p elise` replays it. Needs `cargo install cargo-fuzz`. Non-zero on
-    a failure."""
+    test -p elise` replays it. Needs `cargo install cargo-fuzz`. Built for
+    this machine's target, not the one cargo-fuzz defaults to (the one it
+    was built for: a prebuilt cargo-fuzz is musl's, which ASan can't link).
+    Non-zero on a failure."""
     work = ROOT / "target" / "fuzz"
     corpus, artifacts = work / "corpus", work / "artifacts"
     for directory in (corpus, artifacts):
@@ -88,9 +96,10 @@ def cmd_fuzz(args: argparse.Namespace) -> int:
         dirs.append(str(seeds))
     env = dict(os.environ, CARGO_TARGET_DIR=str(work / "build"))
     flags = [f"-max_total_time={args.minutes * 60}", "-rss_limit_mb=4096", f"-artifact_prefix={artifacts}/"]
+    target = ["--target", host()]
     started = time.time()
     print(f"--- fuzzing for {args.minutes} minutes", flush=True)
-    status = subprocess.run(["cargo", "fuzz", "run", "heap", *dirs, "--", *flags], cwd=FUZZ, env=env).returncode
+    status = subprocess.run(["cargo", "fuzz", "run", *target, "heap", *dirs, "--", *flags], cwd=FUZZ, env=env).returncode
     if status == 0:
         return 0
     found = [path for path in artifacts.iterdir() if path.stat().st_mtime >= started and not path.name.startswith("minimized")]
@@ -100,7 +109,7 @@ def cmd_fuzz(args: argparse.Namespace) -> int:
     crash = max(found, key=lambda path: path.stat().st_mtime)
     print(f"--- minimizing {crash}", flush=True)
     subprocess.run(
-        ["cargo", "fuzz", "tmin", "heap", str(crash), "--", "-max_total_time=120", f"-exact_artifact_path={crash}.min"],
+        ["cargo", "fuzz", "tmin", *target, "heap", str(crash), "--", "-max_total_time=120", f"-exact_artifact_path={crash}.min"],
         cwd=FUZZ,
         env=env,
     )
@@ -151,15 +160,16 @@ def cmd_miri(args: argparse.Namespace) -> int:
     cargo-nextest (a process a test; `cargo install cargo-nextest`), on the
     nightly the fuzzer pins (`rustup +<it> component add miri`). Then the
     one test that leaks on purpose, alone, with `-Zmiri-ignore-leaks`.
-    `--partition I/N` runs only the I-th of N shares of the tests (nextest's
-    `count:I/N`), for machines that split the run between them: the leaking
-    test goes with the first. Arguments after the command go to nextest (a
-    filter, say), and skip the second run. The whole run takes over an hour;
-    the slowest test over half of one. If Miri reports what looks like a
-    false positive, rerun with MIRIFLAGS plus `-Zmiri-tree-borrows`.
+    Every test runs, even after one fails. `--partition I/N` runs only the
+    I-th of N shares of the tests (nextest's `count:I/N`), for machines
+    that split the run between them: the leaking test goes with the
+    first. Arguments after the command go to nextest (a filter, say), and
+    skip the second run. The whole run takes over an hour; the slowest
+    test over half of one. If Miri reports what looks like a false
+    positive, rerun with MIRIFLAGS plus `-Zmiri-tree-borrows`.
     Non-zero if a test fails."""
     toolchain = f"+{nightly()}"
-    base = ["cargo", toolchain, "miri", "nextest", "run", "-p", "elise", "--lib", "--test", "it"]
+    base = ["cargo", toolchain, "miri", "nextest", "run", "--no-fail-fast", "-p", "elise", "--lib", "--test", "it"]
     share = []
     if args.partition is not None:
         if not re.fullmatch(r"[1-9]\d*/[1-9]\d*", args.partition):

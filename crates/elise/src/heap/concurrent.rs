@@ -212,8 +212,10 @@ impl Marker {
     /// engine's, between operations): marks from the segments it takes as
     /// a background run does, until it scanned `limit` objects or it is
     /// `deadline` (if any), and publishes what it holds; out of segments, the
-    /// discovered ephemerons whose key got marked give more. The objects
-    /// it scanned. Not counted active: only the heap's thread asks whether
+    /// discovered ephemerons whose key got marked give more, even as the
+    /// limit runs out with the last segment: else the marking would look
+    /// done with their values unmarked, left to the pause. The objects it
+    /// scanned. Not counted active: only the heap's thread asks whether
     /// the workers are done, and not during a step.
     pub(super) fn step(&self, limit: usize, deadline: Option<Instant>) -> usize {
         let scanned = Cell::new(0usize);
@@ -235,7 +237,7 @@ impl Marker {
                     unsafe { self.scan::<true, false>(item, local, &mut tally, &mut found) };
                     scanned.set(scanned.get().saturating_add(1));
                 });
-            if !drained || over() {
+            if !drained {
                 break;
             }
             sync::lock(&self.discovered).append(&mut found.discovered);
@@ -244,6 +246,9 @@ impl Marker {
                 break;
             }
             self.worklist.flush(&mut local);
+            if over() {
+                break;
+            }
         }
         tally.flush();
         self.add_marked_bytes(tally.bytes);

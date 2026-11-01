@@ -162,7 +162,8 @@ impl Worklist {
     /// A posted job's run: visits items of the segments it takes until none
     /// is left, or until `should_yield` (asked every `YIELD_EVERY` items),
     /// when it publishes what it holds; `published` tells the platform. It
-    /// is never counted busy: nothing waits for it.
+    /// is never counted busy: nothing waits for it. Whether it ran out of
+    /// segments: asked to yield with the last of them, it did.
     pub(crate) fn run_background(
         &self,
         should_yield: &dyn Fn() -> bool,
@@ -183,6 +184,12 @@ impl Worklist {
                 }
                 visited = visited.wrapping_add(1);
                 if visited.is_multiple_of(YIELD_EVERY) && should_yield() {
+                    // Out of segments with this item: drained, not stopped,
+                    // so the caller still turns to what a drain gives (the
+                    // ephemerons whose key got marked).
+                    if local.is_empty() && self.available() == 0 {
+                        return true;
+                    }
                     self.flush(&mut local);
                     return false;
                 }
@@ -389,6 +396,16 @@ mod tests {
         let mut rest = 0usize;
         worklist.run_background(&|| false, &|| {}, |_, _, _| rest += 1);
         assert_eq!(visited + rest, 1000, "nothing lost");
+    }
+
+    /// A background run asked to yield with its last item has drained the
+    /// worklist all the same.
+    #[test]
+    fn a_background_run_asked_to_yield_with_its_last_item_drained() {
+        let worklist = Worklist::with_published(Vec::new(), (0..YIELD_EVERY).collect());
+        let mut visited = 0usize;
+        assert!(worklist.run_background(&|| true, &|| {}, |_, _, _| visited += 1));
+        assert_eq!(visited, YIELD_EVERY);
     }
 
     /// A thread that panics while busy poisons the work: the joining thread
