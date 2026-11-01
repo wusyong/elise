@@ -205,8 +205,8 @@ impl std::fmt::Debug for JsEdge {
 }
 
 /// `T`'s number in the process's table of GC types (cppgc's `GCInfoIndex`),
-/// the same for the process's life: an engine tells its wrappers' types
-/// apart by it (a tag of its own for each).
+/// the same for the process's life, below `MAX_TYPES`: an engine tells its
+/// wrappers' types apart by it (a tag of its own for each).
 #[inline]
 pub fn type_index<T: HeapType>() -> u32 {
     T::__type().index()

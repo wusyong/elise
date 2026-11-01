@@ -55,6 +55,7 @@ impl Cage {
     }
 
     /// Whether `ptr` is in the cage.
+    #[inline]
     pub(crate) fn contains(&self, ptr: *const u8) -> bool {
         ptr.addr().wrapping_sub(self.base.as_ptr().addr()) < CAGE_BYTES
     }

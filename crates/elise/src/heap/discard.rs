@@ -48,6 +48,12 @@ impl Discards {
         self.left.store(queue.todo.len(), Ordering::Relaxed);
     }
 
+    /// Whether pages were discarded since the last `take_done`.
+    #[inline]
+    pub(super) fn has_done(&self) -> bool {
+        self.done.load(Ordering::Relaxed) != 0
+    }
+
     /// The pages discarded since the last call.
     pub(super) fn take_done(&self) -> Vec<usize> {
         if self.done.load(Ordering::Relaxed) == 0 {

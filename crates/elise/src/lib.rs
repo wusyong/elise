@@ -77,7 +77,7 @@ pub use persistent::{Persistent, WeakPersistent};
 pub use platform::{InlinePlatform, Job, JobDelegate, JobHandle, Platform, ThreadPool};
 pub use site::{MAX_SITES, PretenureDecision, Site, SiteStats};
 pub use token::{LocalToken, TokenCell};
-pub use types::{FieldInfo, FieldKind, TypeInfo, TypeSlot};
+pub use types::{FieldInfo, FieldKind, MAX_TYPES, TypeInfo, TypeSlot};
 pub use vector::HeapVector;
 
 /// A type the heap holds, with its layout.

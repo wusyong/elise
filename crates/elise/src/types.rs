@@ -234,8 +234,8 @@ impl TypeSlot {
 }
 
 /// How many types a process may have (cppgc's table grows; a fixed one is
-/// enough for the DOM's types).
-const MAX_TYPES: usize = 1 << 12;
+/// enough for the DOM's types): every `type_index` is below it.
+pub const MAX_TYPES: usize = 1 << 12;
 
 /// A registered type: its layout, and the offsets of its edges, of its
 /// weak edges, of its ephemerons and of its JS edges, each in a row, what

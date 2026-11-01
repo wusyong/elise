@@ -247,6 +247,7 @@ fn fill(base: *mut u8, at: usize, bytes: usize) {
 
 impl Inner {
     /// Whether `offset` is on a young page.
+    #[inline]
     pub(crate) fn is_young(&self, offset: usize) -> bool {
         self.young_pages[page::number_of(offset)].load(StdOrdering::Relaxed)
     }
@@ -313,9 +314,17 @@ impl Inner {
         if value != 0 && self.is_young(value as usize) {
             let slot = self.offset_of(slot);
             if !self.is_young(slot) {
-                self.remember(slot);
+                self.remember_written(slot);
             }
         }
+    }
+
+    /// `remember` for the write barrier: out of the way of its inlined
+    /// checks, most writes recording nothing.
+    #[cold]
+    #[inline(never)]
+    fn remember_written(&self, slot: usize) {
+        self.remember(slot);
     }
 
     /// The write barrier of a weak edge: an old object's to a young one goes
@@ -462,7 +471,7 @@ impl Inner {
             black: self.marking_active.get(),
             from: &from,
             promote_all,
-            young_pages: &self.young_pages,
+            young_pages: &self.young_pages[..],
             remembered: &self.remembered,
             slot_pages: &slot_pages,
             roots: Mutex::new(roots),
@@ -470,7 +479,7 @@ impl Inner {
                 cage: &self.cage,
                 space,
                 marks: &self.mark_table,
-                young_pages: &self.young_pages,
+                young_pages: &self.young_pages[..],
                 to_pages: Vec::new(),
                 to: Cursor::default(),
             }),

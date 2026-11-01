@@ -40,6 +40,7 @@ impl<T: HeapType> Member<T> {
     /// Sets the edge, with the generational write barrier: an old object's
     /// edge to a young one is recorded. No GC runs during an operation, and
     /// none marks alongside one yet, so there is no marking barrier.
+    #[inline]
     pub fn set<'gc>(&self, cx: &Mutation<'gc>, value: Option<Gc<'gc, T>>) {
         let raw = compress(cx, value);
         cx.inner.write_edge(self.checked(cx), raw);
@@ -54,6 +55,7 @@ impl<T: HeapType> Member<T> {
     /// # Panics
     ///
     /// If it is in another heap.
+    #[inline]
     fn checked(&self, cx: &Mutation<'_>) -> &AtomicU32 {
         assert!(
             cx.inner.cage.contains((&raw const self.raw).cast()),
@@ -64,6 +66,7 @@ impl<T: HeapType> Member<T> {
 }
 
 /// A `Gc`'s offset in `cx`'s cage, 0 for none.
+#[inline]
 pub(crate) fn compress<T>(cx: &Mutation<'_>, value: Option<Gc<'_, T>>) -> u32 {
     value.map_or(0, |gc| {
         let ptr = gc.as_ptr().cast::<u8>();

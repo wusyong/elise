@@ -284,7 +284,9 @@ pub(crate) struct Inner {
     /// By page number, whether it is a young page: what the write barrier
     /// reads (V8's page flag), set and cleared only at safepoints (by a
     /// scavenge's threads too, for the to-space pages they take).
-    young_pages: std::sync::Arc<[std::sync::atomic::AtomicBool]>,
+    /// One flag a page, a fixed array: a `u32` offset's page is always in
+    /// it, so the write barrier's look-up has no bounds check.
+    young_pages: std::sync::Arc<[std::sync::atomic::AtomicBool; PAGES]>,
     /// By page number, the old page's (or large object's, at its first
     /// page) slot set.
     remembered: Box<[SlotSet]>,
@@ -489,10 +491,9 @@ impl Heap {
                     ..Space::default()
                 }),
                 cursors: vec![Cell::default(); page::CLASSES.len()],
-                young_pages: (0..PAGES)
-                    .map(|_| std::sync::atomic::AtomicBool::new(false))
-                    .collect::<Vec<_>>()
-                    .into(),
+                young_pages: std::sync::Arc::new(std::array::from_fn(|_| {
+                    std::sync::atomic::AtomicBool::new(false)
+                })),
                 remembered: (0..PAGES).map(|_| SlotSet::default()).collect(),
                 remembered_weak: (0..PAGES).map(|_| SlotSet::default()).collect(),
                 remembered_ephemeron: (0..PAGES).map(|_| SlotSet::default()).collect(),
@@ -1214,7 +1215,32 @@ impl Inner {
     /// or the old generation reached its limit; a full GC at the limit
     /// with none running (no workers to run one alongside); a marking's
     /// start at half the limit; a scavenge once the nursery is full.
+    /// Inlined, its checks alone: most operations find nothing to do, and
+    /// the work's frame (the registers it saves) cost them more than the
+    /// checks.
+    #[inline]
     fn safepoint(&mut self) {
+        if self.has_safepoint_work() {
+            self.safepoint_work();
+        }
+    }
+
+    /// Whether `safepoint_work` has anything to do: the pages discarded
+    /// taken back, a sweep's step, a marking's (or under `stress`, every
+    /// time); a GC for the nursery full; where no engine drives markings,
+    /// the old generation at its limit or half of it.
+    #[inline]
+    fn has_safepoint_work(&mut self) -> bool {
+        self.discards.has_done()
+            || self.sweeping.get()
+            || self.options.stress
+            || self.marking.get_mut().is_some()
+            || self.young.get_mut().full
+            || (!self.options.driven && (self.at_limit(false) || self.starts_marking()))
+    }
+
+    #[inline(never)]
+    fn safepoint_work(&mut self) {
         self.take_discarded();
         self.sweep_at_safepoint();
         if self.options.driven {
