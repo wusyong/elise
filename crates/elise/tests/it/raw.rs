@@ -11,8 +11,8 @@ use std::cell::Cell;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use elise::raw::{self, ArrayLayout, Layout, RegisterError, TypeRange};
-use elise::{Erased, Gc, GcObject, Heap, Member, Mutation, Persistent};
+use elise::raw::{self, ArrayLayout, I31, Layout, Ref, RegisterError, TypeRange};
+use elise::{Erased, Gc, GcObject, Heap, HeapOptions, Member, Mutation, Persistent};
 
 use crate::concurrent::{finish, start_marking, stepping_heap};
 
@@ -66,8 +66,8 @@ fn pair<'gc>(
     let object = raw::alloc(cx, ty);
     // SAFETY: the pair's edges and its `u64`, by its layout.
     unsafe {
-        raw::write_edge(cx, object, 0, left);
-        raw::write_edge(cx, object, 4, right);
+        raw::write_edge(cx, object, 0, left.map(Ref::from));
+        raw::write_edge(cx, object, 4, right.map(Ref::from));
         raw::data(object).as_ptr().add(8).cast::<u64>().write(value);
     }
     object
@@ -80,7 +80,19 @@ fn value(object: Gc<'_, Erased>) -> u64 {
 
 fn left<'gc>(cx: &Mutation<'gc>, object: Gc<'gc, Erased>) -> Option<Gc<'gc, Erased>> {
     // SAFETY: a pair's first edge.
-    unsafe { raw::read_edge(cx, object, 0) }
+    object_in(unsafe { raw::read_edge(cx, object, 0) })
+}
+
+/// The object an edge holds, none if it holds none.
+///
+/// # Panics
+///
+/// If it holds an `I31`.
+fn object_in(value: Option<Ref<'_>>) -> Option<Gc<'_, Erased>> {
+    value.map(|value| match value {
+        Ref::Object(object) => object,
+        Ref::I31(value) => panic!("an I31, {value:?}, where an object was"),
+    })
 }
 
 /// The edge of element `i` of an array of `EDGES`.
@@ -109,7 +121,7 @@ fn check_list(heap: &mut Heap, list: &Persistent<Erased>, len: u64) {
             let here = node.unwrap();
             assert_eq!(value(here), at);
             // SAFETY: a pair's second edge.
-            let right = unsafe { raw::read_edge(cx, here, 4) }.unwrap();
+            let right = object_in(unsafe { raw::read_edge(cx, here, 4) }).unwrap();
             assert_eq!(value(right), u64::MAX);
             node = left(cx, here);
         }
@@ -142,7 +154,7 @@ fn an_arrays_edges_keep_its_elements() {
             for i in (0..len).step_by(997) {
                 let element = pair(cx, ty[0], None, None, u64::from(i));
                 // SAFETY: an element below the array's length.
-                unsafe { raw::write_edge(cx, array, element_at(i), Some(element)) };
+                unsafe { raw::write_edge(cx, array, element_at(i), Some(element.into())) };
             }
             Persistent::new(cx, array)
         })
@@ -155,7 +167,7 @@ fn an_arrays_edges_keep_its_elements() {
                 assert_eq!(unsafe { raw::data(array).cast::<u32>().read() }, len);
                 for i in 0..len {
                     // SAFETY: an element below the length.
-                    let element = unsafe { raw::read_edge(cx, array, element_at(i)) };
+                    let element = object_in(unsafe { raw::read_edge(cx, array, element_at(i)) });
                     if i % 997 == 0 {
                         assert_eq!(value(element.unwrap()), u64::from(i));
                     } else {
@@ -301,7 +313,7 @@ fn the_write_barrier_records_an_old_raw_objects_edge_to_a_young_one() {
         let old = cx.pretenured(|cx| pair(cx, ty[0], None, None, 1));
         let young = pair(cx, ty[0], None, None, 2);
         // SAFETY: the pair's first edge.
-        unsafe { raw::write_edge(cx, old, 0, Some(young)) };
+        unsafe { raw::write_edge(cx, old, 0, Some(young.into())) };
         Persistent::new(cx, old)
     });
     heap.scavenge();
@@ -333,6 +345,209 @@ fn the_marking_barrier_keeps_what_a_raw_edge_held() {
     finish(&mut heap, &steps);
     heap.mutate(|_| {});
     heap.mutate(|cx| assert_eq!(value(left(cx, b.get(cx)).unwrap()), 7));
+}
+
+/// An `I31` whose bits fall inside `object` (its offset, plus one): where
+/// a GC that took it for an object would read what isn't a header.
+fn i31_inside<'gc>(cx: &Mutation<'gc>, object: Gc<'gc, Erased>) -> I31 {
+    let offset = raw::bits(cx, Some(object.into()));
+    let i31 = I31::wrapping_u32(offset >> 1);
+    assert_eq!(raw::bits(cx, Some(i31.into())), offset + 1);
+    i31
+}
+
+/// The `I31` an edge holds.
+///
+/// # Panics
+///
+/// If it holds none, or an object.
+fn i31_in(value: Option<Ref<'_>>) -> I31 {
+    match value {
+        Some(Ref::I31(value)) => value,
+        other => panic!("{other:?} where an I31 was"),
+    }
+}
+
+/// As wasm's `i31ref` and wasmtime's `I31`: 31 bits, wrapped or checked,
+/// read zero- or sign-extended.
+#[test]
+fn an_i31_converts_as_wasms() {
+    let max = u32::MAX >> 1;
+    assert_eq!(I31::wrapping_u32(u32::MAX).get_u32(), max);
+    assert_eq!(I31::wrapping_u32(u32::MAX).get_i32(), -1);
+    assert_eq!(I31::wrapping_i32(-1).get_u32(), max);
+    assert_eq!(I31::wrapping_i32(i32::MIN).get_i32(), 0);
+    assert_eq!(I31::new_u32(max).map(I31::get_u32), Some(max));
+    assert_eq!(I31::new_u32(max + 1), None);
+    assert_eq!(I31::new_i32(-(1 << 30)).map(I31::get_i32), Some(-(1 << 30)));
+    assert_eq!(
+        I31::new_i32((1 << 30) - 1).map(I31::get_i32),
+        Some((1 << 30) - 1)
+    );
+    assert_eq!(I31::new_i32(1 << 30), None);
+    assert_eq!(I31::new_i32(-(1 << 30) - 1), None);
+}
+
+/// An edge's bits: none's are 0, an object's its offset (4-aligned), an
+/// `I31`'s its integer shifted left, the lowest bit set; bits written are
+/// read back as what they stand for.
+#[test]
+fn an_edges_bits_are_what_it_holds() {
+    let (_range, ty) = types(&[PAIR]);
+    let mut heap = Heap::new(crate::verified());
+    heap.mutate(|cx| {
+        assert_eq!(raw::bits(cx, None), 0);
+        assert_eq!(raw::bits(cx, Some(I31::wrapping_u32(5).into())), 11);
+        assert_eq!(raw::bits(cx, Some(I31::wrapping_i32(-1).into())), u32::MAX);
+        let a = pair(cx, ty[0], None, None, 1);
+        let b = pair(cx, ty[0], Some(a), None, 2);
+        // SAFETY: the pair's edges; an object's bits read in this
+        // operation, and `I31`s'.
+        unsafe {
+            let bits = raw::read_bits(cx, b, 0);
+            assert_eq!(bits, raw::bits(cx, Some(a.into())));
+            assert_eq!(bits % 4, 0);
+            raw::write_bits(cx, b, 4, bits);
+            assert!(Gc::ptr_eq(object_in(raw::read_edge(cx, b, 4)).unwrap(), a));
+            raw::write_bits(cx, b, 0, 11);
+            assert_eq!(i31_in(raw::read_edge(cx, b, 0)).get_u32(), 5);
+            raw::write_edge(cx, b, 0, Some(I31::wrapping_i32(-7).into()));
+            assert_eq!(i31_in(raw::read_edge(cx, b, 0)).get_i32(), -7);
+            raw::write_edge(cx, b, 0, None);
+            assert_eq!(raw::read_bits(cx, b, 0), 0);
+        }
+    });
+}
+
+/// `I31`s in a struct's edge and an array's, beside objects, stay as they
+/// are through scavenges and a full GC, each with bits inside a dead
+/// object: young for the scavenges, old for the full GC, where taking it
+/// for an object would read what isn't a header (or keep the dead).
+#[test]
+fn i31s_live_through_scavenges_and_full_gcs() {
+    let (_range, ty) = types(&[PAIR, EDGES]);
+    let mut heap = Heap::new(crate::verified());
+    let (root, mut i31s) = heap.mutate(|cx| {
+        let array = raw::alloc_array(cx, ty[1], 8).unwrap();
+        for i in (0..8).step_by(2) {
+            let element = pair(cx, ty[0], None, None, u64::from(i));
+            // SAFETY: as above.
+            unsafe { raw::write_edge(cx, array, element_at(i), Some(element.into())) };
+        }
+        let dead = pair(cx, ty[0], None, None, u64::MAX);
+        let root = pair(cx, ty[0], None, None, 100);
+        // SAFETY: the pair's edges.
+        unsafe {
+            raw::write_edge(cx, root, 0, Some(i31_inside(cx, dead).into()));
+            raw::write_edge(cx, root, 4, Some(array.into()));
+        }
+        (Persistent::new(cx, root), fill(cx, ty[0], array, false))
+    });
+    // SAFETY: the pair's first edge.
+    let first = heap.mutate(|cx| i31_in(unsafe { raw::read_edge(cx, root.get(cx), 0) }));
+    let check = |heap: &mut Heap, i31s: &[I31]| {
+        heap.mutate(|cx| {
+            let root = root.get(cx);
+            // SAFETY: the pair's edges, then the array's elements.
+            unsafe {
+                assert_eq!(i31_in(raw::read_edge(cx, root, 0)), first);
+                let array = object_in(raw::read_edge(cx, root, 4)).unwrap();
+                for i in 0..8 {
+                    let element = raw::read_edge(cx, array, element_at(i));
+                    if i % 2 == 0 {
+                        assert_eq!(value(object_in(element).unwrap()), u64::from(i));
+                    } else {
+                        assert_eq!(i31_in(element), i31s[i as usize / 2]);
+                    }
+                }
+            }
+        });
+    };
+    heap.scavenge();
+    check(&mut heap, &i31s);
+    heap.scavenge();
+    check(&mut heap, &i31s);
+    i31s = heap.mutate(|cx| {
+        let array = left_of_right(cx, root.get(cx));
+        fill(cx, ty[0], array, true)
+    });
+    heap.collect();
+    check(&mut heap, &i31s);
+    // The root, the array and its four pairs: no dead one.
+    assert_eq!(heap.stats().last_gc.marked_objects, 6);
+}
+
+/// An `I31` at each odd element of `array`, of `EDGES`, each inside a pair
+/// of type `pair_ty` that dies (`old`, or young): the `I31`s.
+fn fill<'gc>(cx: &Mutation<'gc>, pair_ty: u32, array: Gc<'gc, Erased>, old: bool) -> Vec<I31> {
+    (1..8)
+        .step_by(2)
+        .map(|i| {
+            let dead = if old {
+                cx.pretenured(|cx| pair(cx, pair_ty, None, None, u64::MAX))
+            } else {
+                pair(cx, pair_ty, None, None, u64::MAX)
+            };
+            let i31 = i31_inside(cx, dead);
+            // SAFETY: an element below the array's length.
+            unsafe { raw::write_edge(cx, array, element_at(i), Some(i31.into())) };
+            i31
+        })
+        .collect()
+}
+
+/// The array a root pair's second edge holds.
+fn left_of_right<'gc>(cx: &Mutation<'gc>, root: Gc<'gc, Erased>) -> Gc<'gc, Erased> {
+    // SAFETY: the pair's second edge.
+    object_in(unsafe { raw::read_edge(cx, root, 4) }).unwrap()
+}
+
+/// An old object's edge, recorded holding a young object, then given an
+/// `I31` with bits inside that object, which dies: the scavenge, going
+/// through the slot set, leaves the `I31` and copies nothing.
+#[test]
+fn a_slot_set_naming_an_edge_that_since_holds_an_i31_skips_it() {
+    let (_range, ty) = types(&[PAIR]);
+    let mut heap = Heap::new(crate::verified());
+    let (old, i31) = heap.mutate(|cx| {
+        let old = cx.pretenured(|cx| pair(cx, ty[0], None, None, 1));
+        let young = pair(cx, ty[0], None, None, 2);
+        let i31 = i31_inside(cx, young);
+        // SAFETY: the pair's first edge.
+        unsafe {
+            raw::write_edge(cx, old, 0, Some(young.into()));
+            raw::write_edge(cx, old, 0, Some(i31.into()));
+        }
+        (Persistent::new(cx, old), i31)
+    });
+    heap.scavenge();
+    assert_eq!(heap.stats().last_scavenge.survived_objects, 0);
+    // SAFETY: as above.
+    heap.mutate(|cx| assert_eq!(i31_in(unsafe { raw::read_edge(cx, old.get(cx), 0) }), i31));
+}
+
+/// While marking, an edge holding an `I31` with bits inside a dead old
+/// object is cut: the barrier marks nothing, the dead object isn't kept.
+#[test]
+fn the_marking_barrier_takes_no_i31() {
+    let (_range, ty) = types(&[PAIR]);
+    let (mut heap, steps) = stepping_heap(0);
+    let a = heap.mutate(|cx| {
+        cx.pretenured(|cx| {
+            let dead = pair(cx, ty[0], None, None, 7);
+            let a = pair(cx, ty[0], None, None, 1);
+            // SAFETY: the pair's first edge.
+            unsafe { raw::write_edge(cx, a, 0, Some(i31_inside(cx, dead).into())) };
+            Persistent::new(cx, a)
+        })
+    });
+    start_marking(&mut heap);
+    // SAFETY: as above.
+    heap.mutate(|cx| unsafe { raw::write_edge(cx, a.get(cx), 0, None) });
+    finish(&mut heap, &steps);
+    heap.mutate(|_| {});
+    assert_eq!(heap.stats().last_gc.marked_objects, 1);
+    drop(a);
 }
 
 #[test]
@@ -601,4 +816,345 @@ fn a_released_range_frees_its_indices() {
         assert_eq!(freed.base(), base + 1, "the retired one, freed");
         assert_ne!(TypeRange::reserve(1).unwrap().base(), base, "registered");
     });
+}
+
+/// An engine's frames' roots, as slots of bits, for a GC given them.
+fn give(slots: &mut [u32]) -> impl FnMut(&mut dyn FnMut(&mut u32)) + '_ {
+    move |visit| {
+        for slot in slots.iter_mut() {
+            visit(slot);
+        }
+    }
+}
+
+/// A pair through bits (inside frames, where no GC is due here), `left`
+/// and `right` its edges' bits.
+fn pair_bits(heap: &mut Heap, ty: u32, left: u32, right: u32, value: u64) -> u32 {
+    let object = raw::alloc_bits(heap, ty).expect("no GC due");
+    // SAFETY: the pair just allocated, its edges; `left` and `right` the
+    // caller's, live (the frames hold them).
+    unsafe {
+        raw::write_bits_in(heap, object, 0, left);
+        raw::write_bits_in(heap, object, 4, right);
+    }
+    heap.mutate(|cx| {
+        // SAFETY: as above; its `u64`.
+        unsafe {
+            raw::data(object_of(cx, object))
+                .as_ptr()
+                .add(8)
+                .cast::<u64>()
+                .write(value);
+        }
+    });
+    object
+}
+
+/// The object a frame's `bits` hold, in an operation.
+fn object_of<'gc>(cx: &Mutation<'gc>, bits: u32) -> Gc<'gc, Erased> {
+    // SAFETY: the test's frames hold `bits`, of a live object (a GC given
+    // them kept it), and no GC runs before `'gc` ends.
+    object_in(unsafe { raw::from_bits(cx, bits) }).expect("an object's bits")
+}
+
+/// The `u64` of the pair a frame's `bits` hold.
+fn value_of(heap: &mut Heap, bits: u32) -> u64 {
+    heap.mutate(|cx| value(object_of(cx, bits)))
+}
+
+/// The bits of the edge at `at` of the pair a frame's `bits` hold.
+fn edge_of(heap: &Heap, bits: u32, at: u32) -> u32 {
+    // SAFETY: as `object_of`; the pair's edge.
+    unsafe { raw::read_bits_in(heap, bits, at) }
+}
+
+fn i31_bits(heap: &mut Heap, value: u32) -> u32 {
+    heap.mutate(|cx| raw::bits(cx, Some(I31::wrapping_u32(value).into())))
+}
+
+/// The length of a `WORDS` array of 4 KiB: what fills a nursery or the old
+/// generation in a few hundred allocations (Miri takes half an hour for tens
+/// of thousands).
+const FILLER_WORDS: u32 = 511;
+
+/// Inside an engine's frames, which hold roots the heap can't see, no
+/// safepoint starts a GC: the nursery full, objects go to the old
+/// generation, which grows past its limit; once the frames are left, the
+/// next does.
+#[test]
+fn inside_frames_a_safepoint_starts_no_gc() {
+    let (_range, ty) = types(&[WORDS]);
+    let mut heap = Heap::new(HeapOptions {
+        nursery_bytes: 256 << 10,
+        min_allocation_bytes: 64 << 10,
+        ..crate::verified()
+    });
+    heap.enter_frames();
+    heap.enter_frames();
+    heap.leave_frames();
+    assert!(heap.in_frames());
+    // 1 MiB, in 256 objects.
+    for _ in 0..16 {
+        heap.mutate(|cx| {
+            for _ in 0..16 {
+                raw::alloc_array(cx, ty[0], FILLER_WORDS).unwrap();
+            }
+        });
+    }
+    let stats = heap.stats();
+    assert_eq!((stats.scavenges, stats.gcs), (0, 0));
+    assert!(!heap.is_marking());
+    assert!(stats.used_bytes > 128 << 10, "{}", stats.used_bytes);
+    assert!(heap.should_collect());
+    heap.leave_frames();
+    assert!(!heap.in_frames());
+    heap.mutate(|_| {});
+    let stats = heap.stats();
+    assert!(stats.scavenges + stats.gcs > 0 || heap.is_marking());
+}
+
+/// A scavenge given the frames' roots keeps what they reach, moved, and
+/// writes their new bits back; none and an `I31` stay as they are.
+#[test]
+fn a_scavenge_given_roots_moves_what_they_hold() {
+    let (_range, ty) = types(&[PAIR]);
+    let mut heap = Heap::new(crate::verified());
+    heap.enter_frames();
+    let i31 = i31_bits(&mut heap, 7);
+    let b = pair_bits(&mut heap, ty[0], i31, 0, 2);
+    let a = pair_bits(&mut heap, ty[0], b, 0, 1);
+    pair_bits(&mut heap, ty[0], 0, 0, 3);
+    let mut slots = [a, 0, i31];
+    // SAFETY: the slots hold an object of the heap, none and an `I31`.
+    unsafe { heap.scavenge_with_roots(give(&mut slots)) };
+    assert_eq!(heap.stats().last_scavenge.survived_objects, 2);
+    assert_ne!(slots[0], a, "moved");
+    assert_eq!(slots[1..], [0, i31]);
+    assert_eq!(value_of(&mut heap, slots[0]), 1);
+    let b = edge_of(&heap, slots[0], 0);
+    assert_eq!(value_of(&mut heap, b), 2);
+    assert_eq!(edge_of(&heap, b, 0), i31);
+    heap.mutate(|cx| {
+        // SAFETY: none, and an `I31`'s bits.
+        unsafe {
+            assert!(raw::from_bits(cx, 0).is_none());
+            assert_eq!(i31_in(raw::from_bits(cx, i31)).get_u32(), 7);
+        }
+    });
+}
+
+/// A full GC given the frames' roots marks from them: what they reach
+/// lives (promoted, its bits written back), the rest dies.
+#[test]
+fn a_full_gc_given_roots_keeps_what_they_reach() {
+    let (_range, ty) = types(&[PAIR]);
+    let mut heap = Heap::new(crate::verified());
+    heap.enter_frames();
+    let b = pair_bits(&mut heap, ty[0], 0, 0, 2);
+    let a = pair_bits(&mut heap, ty[0], 0, b, 1);
+    pair_bits(&mut heap, ty[0], a, 0, 3);
+    let mut slots = [0, a];
+    // SAFETY: the slots hold none and an object of the heap.
+    unsafe { heap.collect_with_roots(give(&mut slots)) };
+    assert_eq!(heap.stats().last_gc.marked_objects, 2);
+    assert_ne!(slots[1], a, "promoted");
+    assert_eq!(value_of(&mut heap, slots[1]), 1);
+    let b = edge_of(&heap, slots[1], 4);
+    assert_eq!(value_of(&mut heap, b), 2);
+}
+
+/// A concurrent marking starts and finishes only where the frames' roots
+/// are given: the snapshot holds what they reach, and what they take from
+/// an edge then cut while it runs, SATB's barrier keeps; what they let go
+/// meanwhile floats (the verifier knows it from the snapshot's roots).
+#[test]
+fn a_marking_inside_frames_starts_and_ends_given_roots() {
+    let (_range, ty) = types(&[PAIR]);
+    let (mut heap, steps) = stepping_heap(0);
+    heap.enter_frames();
+    let z = pair_bits(&mut heap, ty[0], 0, 0, 26);
+    let x = pair_bits(&mut heap, ty[0], z, 0, 24);
+    let mut slots = vec![x];
+    for _ in 0..1000 {
+        if heap.should_collect() {
+            break;
+        }
+        heap.mutate(|cx| {
+            for _ in 0..100 {
+                pair(cx, ty[0], None, None, 0);
+            }
+        });
+    }
+    assert!(!heap.is_marking(), "none starts inside frames");
+    // SAFETY: the slots hold an object of the heap.
+    unsafe { heap.safepoint_with_roots(give(&mut slots)) };
+    assert!(heap.is_marking());
+    // The frames take `z` from `x`'s edge, which they then cut.
+    slots.push(edge_of(&heap, slots[0], 0));
+    // SAFETY: `x`'s edge, set to none.
+    unsafe { raw::write_bits_in(&mut heap, slots[0], 0, 0) };
+    // The barrier's `z` published, then marked, then the marking found
+    // done.
+    heap.mutate(|_| {});
+    steps.step();
+    heap.mutate(|_| {});
+    assert!(heap.is_marking(), "none ends inside frames");
+    assert!(heap.should_collect());
+    // The frames let `x` go.
+    slots.remove(0);
+    // SAFETY: the slot holds `z`.
+    unsafe { heap.safepoint_with_roots(give(&mut slots)) };
+    assert!(!heap.is_marking());
+    assert!(heap.stats().last_gc.concurrent);
+    assert_eq!(value_of(&mut heap, slots[0]), 26);
+}
+
+/// An allocation through bits never GCs: it fails as a GC is due, which a
+/// safepoint inside the frames leaves be, and once one given the roots
+/// ran, the next allocation doesn't wait for another.
+#[test]
+fn an_allocation_through_bits_fails_as_a_gc_is_due() {
+    let (_range, ty) = types(&[WORDS]);
+    let mut heap = Heap::new(HeapOptions {
+        nursery_bytes: 256 << 10,
+        ..crate::verified()
+    });
+    heap.enter_frames();
+    let mut slots = Vec::new();
+    loop {
+        match raw::alloc_array_bits(&mut heap, ty[0], FILLER_WORDS) {
+            Ok(bits) => slots.push(bits),
+            Err(error) => {
+                assert_eq!(error, raw::AllocError::GcDue);
+                break;
+            }
+        }
+        assert!(slots.len() < 1 << 20, "no GC due");
+    }
+    assert_eq!(heap.stats().scavenges, 0);
+    heap.mutate(|_| {});
+    assert_eq!(
+        raw::alloc_array_bits(&mut heap, ty[0], FILLER_WORDS),
+        Err(raw::AllocError::GcDue)
+    );
+    // SAFETY: the slots hold objects of the heap.
+    unsafe { heap.safepoint_with_roots(give(&mut slots)) };
+    let record = heap.stats().last_scavenge;
+    assert_eq!(heap.stats().scavenges, 1);
+    assert_eq!(
+        record.survived_objects + record.promoted_objects,
+        slots.len() - 1,
+        "all but the last, old"
+    );
+    raw::alloc_array_bits(&mut heap, ty[0], FILLER_WORDS).unwrap();
+}
+
+/// Under `stress`, where a GC is due at every safepoint, an allocation
+/// through bits succeeds after one given the roots, then not; an array too
+/// large says so first.
+#[test]
+fn an_allocation_through_bits_after_a_gc_doesnt_wait_for_another() {
+    let (_range, ty) = types(&[PAIR, EDGES]);
+    let mut heap = Heap::new(HeapOptions {
+        stress: true,
+        ..crate::verified()
+    });
+    heap.enter_frames();
+    assert_eq!(
+        raw::alloc_bits(&mut heap, ty[0]),
+        Err(raw::AllocError::GcDue)
+    );
+    assert_eq!(
+        raw::alloc_array_bits(&mut heap, ty[1], u32::MAX),
+        Err(raw::AllocError::TooLarge)
+    );
+    // SAFETY: no roots.
+    unsafe { heap.safepoint_with_roots(give(&mut [])) };
+    let mut slots = [raw::alloc_array_bits(&mut heap, ty[1], 4).unwrap()];
+    assert_eq!(
+        raw::alloc_bits(&mut heap, ty[0]),
+        Err(raw::AllocError::GcDue)
+    );
+    // SAFETY: the slot holds an object of the heap.
+    unsafe { heap.safepoint_with_roots(give(&mut slots)) };
+    raw::alloc_bits(&mut heap, ty[0]).unwrap();
+    heap.mutate(|cx| {
+        // SAFETY: the array's length, its first `u32`.
+        let length = unsafe { raw::data(object_of(cx, slots[0])).cast::<u32>().read() };
+        assert_eq!(length, 4);
+    });
+}
+
+/// The write barrier through bits: an old object's edge set to a young
+/// one is in its slot set, so a scavenge given only the old one keeps it.
+#[test]
+fn the_write_barrier_through_bits_records_an_old_objects_edge() {
+    let (_range, ty) = types(&[PAIR]);
+    let mut heap = Heap::new(crate::verified());
+    heap.enter_frames();
+    let mut slots = [pair_bits(&mut heap, ty[0], 0, 0, 1)];
+    // SAFETY: the slot holds an object of the heap.
+    unsafe { heap.collect_with_roots(give(&mut slots)) };
+    let young = pair_bits(&mut heap, ty[0], 0, 0, 2);
+    // SAFETY: the old pair's edge, set to the young one.
+    unsafe { raw::write_bits_in(&mut heap, slots[0], 0, young) };
+    // SAFETY: as above.
+    unsafe { heap.scavenge_with_roots(give(&mut slots)) };
+    assert_eq!(heap.stats().last_scavenge.survived_objects, 1);
+    let young = edge_of(&heap, slots[0], 0);
+    assert_eq!(value_of(&mut heap, young), 2);
+}
+
+#[test]
+#[should_panic = "an engine's frames hold roots"]
+fn a_full_gc_inside_frames_needs_their_roots() {
+    let mut heap = Heap::new(crate::verified());
+    heap.enter_frames();
+    heap.collect();
+}
+
+#[test]
+#[should_panic = "an engine's frames hold roots"]
+fn a_scavenge_inside_frames_needs_their_roots() {
+    let mut heap = Heap::new(crate::verified());
+    heap.enter_frames();
+    heap.scavenge();
+}
+
+#[test]
+#[should_panic = "frames entered to leave"]
+fn frames_left_were_entered() {
+    Heap::new(crate::verified()).leave_frames();
+}
+
+/// The roots given again are those given first: more panics, as fewer.
+#[test]
+fn the_roots_given_again_are_as_many() {
+    for (first, again) in [(1, 2), (2, 1)] {
+        let result = std::panic::catch_unwind(|| {
+            let mut heap = Heap::new(crate::verified());
+            let mut slots = [0u32; 2];
+            let mut calls = 0;
+            // SAFETY: the slots hold none.
+            unsafe {
+                heap.scavenge_with_roots(|visit: &mut dyn FnMut(&mut u32)| {
+                    calls += 1;
+                    let count = if calls == 1 { first } else { again };
+                    for slot in &mut slots[..count] {
+                        visit(slot);
+                    }
+                });
+            }
+        });
+        let payload = result.expect_err("a panic");
+        let message = payload
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| payload.downcast_ref::<&str>().copied());
+        assert_eq!(
+            message,
+            Some("the roots given again are as many as first"),
+            "{first} then {again}"
+        );
+    }
 }

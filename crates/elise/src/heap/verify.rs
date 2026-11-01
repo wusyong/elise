@@ -115,7 +115,7 @@ impl Inner {
     /// verifier's own. (A driven heap's engine holds more: the marking
     /// records what it hands over.)
     pub(super) fn reachable(&self) -> HashSet<usize> {
-        self.reachable_from(self.shared.roots.in_use())
+        self.reachable_from(self.root_offsets())
     }
 
     /// The objects `stack`'s reach, themselves included, through strong
@@ -162,8 +162,11 @@ impl Inner {
                         edge(i.saturating_add(1).saturating_mul(4));
                     }
                 }
-                // SAFETY: a whole object of the type.
-                Kind::Raw => unsafe { entry.raw_edges(self.ptr(data)) }.for_each(edge),
+                // SAFETY: a whole object of the type. An `I31` is no
+                // object.
+                Kind::Raw => unsafe { entry.raw_edges(self.ptr(data)) }
+                    .filter(|&at| !self.holds_i31(data.saturating_add(at)))
+                    .for_each(edge),
             }
         }
         seen
@@ -200,7 +203,7 @@ impl Inner {
         // until no more.
         let mut seen = HashSet::new();
         let mut stack: Vec<(usize, String)> = Vec::new();
-        for (index, offset) in self.shared.roots.in_use().into_iter().enumerate() {
+        for (index, offset) in self.root_offsets().into_iter().enumerate() {
             stack.push((offset, format!("root {index}")));
         }
         let mut pending: Vec<(u32, u32, String)> = Vec::new();
@@ -286,7 +289,11 @@ impl Inner {
                         // SAFETY: a whole object of the type.
                         for at in unsafe { entry.raw_edges(self.ptr(data)) } {
                             // SAFETY: an edge of the object, by its layout.
-                            edge(at, unsafe { self.ptr(data).add(at).cast::<u32>().read() });
+                            let value = unsafe { self.ptr(data).add(at).cast::<u32>().read() };
+                            // An `I31` is no object.
+                            if !crate::raw::is_i31(value) {
+                                edge(at, value);
+                            }
                         }
                     }
                 }
@@ -638,7 +645,7 @@ impl Inner {
         // which a scavenge doesn't judge.)
         let mut seen = HashSet::new();
         let mut stack: Vec<(usize, String)> = Vec::new();
-        for (index, offset) in self.shared.roots.in_use().into_iter().enumerate() {
+        for (index, offset) in self.root_offsets().into_iter().enumerate() {
             stack.push((offset, format!("root {index}")));
         }
         while let Some((data, from)) = stack.pop() {
@@ -674,8 +681,11 @@ impl Inner {
                         .map(|i| i.saturating_add(1).saturating_mul(4))
                         .collect()
                 }
-                // SAFETY: a whole object of the type.
-                Kind::Raw => unsafe { entry.raw_edges(self.ptr(data)) }.collect(),
+                // SAFETY: a whole object of the type. An `I31` is no
+                // object.
+                Kind::Raw => unsafe { entry.raw_edges(self.ptr(data)) }
+                    .filter(|&at| !self.holds_i31(data.saturating_add(at)))
+                    .collect(),
             };
             for at in edges {
                 let slot = data.saturating_add(at);
@@ -891,6 +901,12 @@ impl Inner {
             ));
         }
         Ok(())
+    }
+
+    /// Whether the edge at `slot`, of a whole object, holds an `I31`.
+    fn holds_i31(&self, slot: usize) -> bool {
+        // SAFETY: as the caller promises, an edge of a whole object.
+        crate::raw::is_i31(unsafe { self.ptr(slot).cast::<u32>().read() })
     }
 
     /// Whether the old edge at `slot` is in its page's (or large object's)

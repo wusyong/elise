@@ -382,6 +382,19 @@ pub(crate) struct Inner {
     /// Under `stress`, the safepoints so far: each scavenges, or runs a full
     /// GC (or a concurrent marking's start or end), by turns.
     stress_step: Cell<u8>,
+    /// How many times an engine's frames that hold the heap's objects as
+    /// bits it can't see (wasm's) were entered and not left
+    /// (`Heap::enter_frames`): while any are, no safepoint starts a GC that
+    /// reads the roots.
+    frames: usize,
+    /// The bits the frames' roots hold, while a GC given them runs
+    /// (`Heap::safepoint_with_roots`): a scavenge's to update, a marking's
+    /// start's to mark, the verifier's to walk from. Empty otherwise.
+    frame_roots: Vec<u32>,
+    /// Whether a GC given the frames' roots ran since the last allocation
+    /// through bits (`raw::alloc_bits`): that one then doesn't wait for
+    /// another, as the engine retries once after its GC.
+    collected_with_roots: bool,
     /// The heap's full GCs, which a retired runtime type waits on (`raw`):
     /// dropped last, once nothing reads the heap's objects.
     record: types::HeapRecord,
@@ -548,6 +561,9 @@ impl Heap {
                 markings_at_limit: Cell::new(0),
                 background_mark_ns: Cell::new(0),
                 stress_step: Cell::new(0),
+                frames: 0,
+                frame_roots: Vec::new(),
+                collected_with_roots: false,
                 record: types::HeapRecord::new(),
             },
         }
@@ -581,7 +597,8 @@ impl Heap {
     }
 
     /// Whether `mutate` would do a GC's work first: a scavenge, a full GC,
-    /// or a concurrent marking's start or end.
+    /// or a concurrent marking's start or end. Inside an engine's frames
+    /// (`enter_frames`), whether `safepoint_with_roots` would.
     pub fn should_collect(&self) -> bool {
         let inner = &self.inner;
         let marking = inner.marking.borrow().is_some();
@@ -614,25 +631,163 @@ impl Heap {
     /// # Panics
     ///
     /// In a heap the engine drives (`HeapOptions::driven`): its full GCs
-    /// are the engine's, which alone knows what its wrappers keep.
+    /// are the engine's, which alone knows what its wrappers keep. Inside
+    /// an engine's frames (`enter_frames`): they hold roots, which
+    /// `collect_with_roots` is given.
     pub fn collect(&mut self) {
-        assert!(
-            !self.inner.options.driven,
-            "the engine collects the heap it drives"
-        );
-        self.inner.take_discarded();
-        if self.inner.marking.get_mut().is_some() {
-            self.inner.drain_barrier();
-            self.inner.finish_marking();
-        }
-        self.inner.collect(true);
+        self.assert_no_frames();
+        self.inner.collect_now();
     }
 
     /// A scavenge of the nursery now, at this safepoint.
+    ///
+    /// # Panics
+    ///
+    /// Inside an engine's frames (`enter_frames`): they hold roots, which
+    /// `scavenge_with_roots` is given.
     pub fn scavenge(&mut self) {
-        self.inner.take_discarded();
-        self.inner.sweep_at_safepoint();
-        self.inner.scavenge_alone();
+        self.assert_no_frames();
+        self.inner.scavenge_now();
+    }
+
+    fn assert_no_frames(&self) {
+        assert!(
+            self.inner.frames == 0,
+            "an engine's frames hold roots: give them (`*_with_roots`)"
+        );
+    }
+
+    /// An engine's frames that hold the heap's objects as bits the heap
+    /// can't see (wasm's, called into the embedder) are on the stack, in
+    /// any entered before: until they are left, a safepoint (`mutate`'s)
+    /// starts no GC that reads the roots, which they hold too: no
+    /// scavenge, no full GC, no concurrent marking's start or end (with the
+    /// nursery full, objects go to the old generation). A sweep and a
+    /// marking go on. The engine runs those GCs where it holds every root
+    /// (`safepoint_with_roots`): as an allocation through bits finds one
+    /// due (`raw::alloc_bits`), as V8 GCs where wasm's `struct.new` does,
+    /// its frames' roots from their safepoint tables. cppgc is told the
+    /// same of a stack (`EmbedderStackState::kMayContainHeapPointers`), and
+    /// scans it conservatively; the heap scans nothing.
+    ///
+    /// # Panics
+    ///
+    /// If the frames entered and not left number `usize::MAX`.
+    pub fn enter_frames(&mut self) {
+        self.inner.frames = self
+            .inner
+            .frames
+            .checked_add(1)
+            .expect("fewer frames entered than usize::MAX");
+    }
+
+    /// The frames entered last (`enter_frames`) are off the stack.
+    ///
+    /// # Panics
+    ///
+    /// If none were entered.
+    pub fn leave_frames(&mut self) {
+        self.inner.frames = self
+            .inner
+            .frames
+            .checked_sub(1)
+            .expect("frames entered to leave");
+    }
+
+    /// Whether an engine's frames are on the stack (`enter_frames`).
+    pub fn in_frames(&self) -> bool {
+        self.inner.frames != 0
+    }
+
+    /// What `mutate`'s safepoint does outside an engine's frames (a
+    /// scavenge, a full GC, a concurrent marking's start or end, or
+    /// nothing; and a sweep's step), with the frames' roots: `roots` calls
+    /// the function it is given on each. A root holds the bits of none, an
+    /// `I31` or an object of the heap; a GC skips the first two, keeps the
+    /// objects, and writes their bits back where it moved them. wasmtime's
+    /// `GcHeap::gc`, given its roots (`GcRootsIter`) each time, as they are
+    /// on its stack then: none is kept here.
+    ///
+    /// # Safety
+    ///
+    /// Each root holds 0, an `I31`'s bits (odd), or the offset of a live
+    /// object of the heap; `roots` gives the same roots in the same order
+    /// each time it is called (once read, once written back).
+    ///
+    /// # Panics
+    ///
+    /// If `roots` gives more or fewer roots the second time.
+    pub unsafe fn safepoint_with_roots(&mut self, roots: impl FnMut(&mut dyn FnMut(&mut u32))) {
+        self.with_roots(roots, |inner| {
+            inner.take_discarded();
+            inner.sweep_at_safepoint();
+            inner.gc_work();
+        });
+    }
+
+    /// `scavenge` with an engine's frames' roots (`safepoint_with_roots`).
+    ///
+    /// # Safety
+    ///
+    /// As `safepoint_with_roots`.
+    ///
+    /// # Panics
+    ///
+    /// As `safepoint_with_roots`.
+    pub unsafe fn scavenge_with_roots(&mut self, roots: impl FnMut(&mut dyn FnMut(&mut u32))) {
+        self.with_roots(roots, Inner::scavenge_now);
+    }
+
+    /// `collect` with an engine's frames' roots (`safepoint_with_roots`):
+    /// wasmtime's `Store::gc`.
+    ///
+    /// # Safety
+    ///
+    /// As `safepoint_with_roots`.
+    ///
+    /// # Panics
+    ///
+    /// As `safepoint_with_roots`; in a heap the engine drives, as
+    /// `collect`.
+    pub unsafe fn collect_with_roots(&mut self, roots: impl FnMut(&mut dyn FnMut(&mut u32))) {
+        self.with_roots(roots, Inner::collect_now);
+    }
+
+    /// `gc` with the bits `roots` gives, written back after.
+    fn with_roots(
+        &mut self,
+        mut roots: impl FnMut(&mut dyn FnMut(&mut u32)),
+        gc: impl FnOnce(&mut Inner),
+    ) {
+        let mut bits = Vec::new();
+        roots(&mut |root| bits.push(*root));
+        self.inner.frame_roots = bits;
+        gc(&mut self.inner);
+        self.inner.collected_with_roots = true;
+        let mut bits = std::mem::take(&mut self.inner.frame_roots).into_iter();
+        roots(&mut |root| {
+            *root = bits
+                .next()
+                .expect("the roots given again are as many as first");
+        });
+        assert!(
+            bits.next().is_none(),
+            "the roots given again are as many as first"
+        );
+    }
+
+    /// The heap for an allocation through bits (`raw::alloc_bits`): `None`
+    /// if a GC is due, which only the engine, holding the frames' roots,
+    /// may run, unless one just ran.
+    pub(crate) fn for_bits(&mut self) -> Option<&Inner> {
+        if !std::mem::take(&mut self.inner.collected_with_roots) && self.should_collect() {
+            return None;
+        }
+        Some(&self.inner)
+    }
+
+    pub(crate) fn inner(&self) -> &Inner {
+        &self.inner
     }
 
     pub fn stats(&self) -> HeapStats {
@@ -1251,6 +1406,27 @@ impl Inner {
     fn safepoint_work(&mut self) {
         self.take_discarded();
         self.sweep_at_safepoint();
+        if self.frames != 0 {
+            // An engine's frames hold roots this can't see: what reads the
+            // roots waits for them (`Heap::safepoint_with_roots`), or for
+            // the frames to be left. The barrier's objects go to the
+            // workers meanwhile.
+            if self.marking.get_mut().is_some() {
+                self.drain_barrier();
+                if let Some(marking) = self.marking.get_mut()
+                    && self.options.driven
+                {
+                    marking.notify();
+                }
+            }
+            return;
+        }
+        self.gc_work();
+    }
+
+    /// A safepoint's GC, where every root is known: a scavenge, a full GC,
+    /// a marking's start or end, as the heap's state says.
+    fn gc_work(&mut self) {
         if self.options.driven {
             // The engine starts and finishes markings (`Heap::start_marking`);
             // the barrier's objects go to the workers meanwhile. Under
@@ -1353,6 +1529,42 @@ impl Inner {
     /// `cargo test` runs it.
     fn verifies(&self) -> bool {
         self.options.verify || (self.options.stress && !cfg!(miri))
+    }
+
+    /// `Heap::collect`: a marking running finished first.
+    fn collect_now(&mut self) {
+        assert!(
+            !self.options.driven,
+            "the engine collects the heap it drives"
+        );
+        self.take_discarded();
+        if self.marking.get_mut().is_some() {
+            self.drain_barrier();
+            self.finish_marking();
+        }
+        self.collect(true);
+    }
+
+    /// `Heap::scavenge`.
+    fn scavenge_now(&mut self) {
+        self.take_discarded();
+        self.sweep_at_safepoint();
+        self.scavenge_alone();
+    }
+
+    /// The objects the roots hold, by data offset: the root table's, and
+    /// an engine's frames' while a GC given them runs. A marking needs the
+    /// frames' at its start only: after, what they get is of the snapshot
+    /// (which SATB keeps) or new (black, or young).
+    pub(super) fn root_offsets(&self) -> Vec<usize> {
+        let mut offsets = self.shared.roots.in_use();
+        offsets.extend(
+            self.frame_roots
+                .iter()
+                .filter(|&&bits| bits != 0 && !crate::raw::is_i31(bits))
+                .map(|&bits| bits as usize),
+        );
+        offsets
     }
 
     /// A full GC now, with no marking running: the last one's sweep
@@ -1507,9 +1719,7 @@ impl Inner {
             }
         }
         let roots: Vec<usize> = self
-            .shared
-            .roots
-            .in_use()
+            .root_offsets()
             .into_iter()
             .filter(|&offset| self.mark_table.mark(offset))
             .collect();
@@ -2555,7 +2765,7 @@ mod tests {
             });
             let raw = crate::raw::alloc(cx, index);
             // SAFETY: the raw pair's second edge.
-            unsafe { crate::raw::write_edge(cx, raw, 4, Some(pair.erase())) };
+            unsafe { crate::raw::write_edge(cx, raw, 4, Some(pair.erase().into())) };
             Persistent::new(cx, raw)
         });
         heap.collect();
@@ -2597,6 +2807,29 @@ mod tests {
         });
         heap.inner.verify_young();
         drop(root);
+    }
+
+    /// An `I31` written into an old raw object's edge, its bits on a young
+    /// page, isn't recorded (an object's offset there is).
+    #[test]
+    fn the_write_barrier_records_no_i31() {
+        let (_range, index) = raw_pair();
+        let (mut heap, root, data, _) = collected_raw(index);
+        let number = page::number_of(data);
+        heap.mutate(|cx| {
+            let young = cx.alloc(PairInit {
+                next: None,
+                value: Cell::new(2),
+            });
+            let bits = crate::raw::bits(cx, Some(young.erase().into()));
+            assert!(cx.inner.is_young(bits as usize | 1));
+            // SAFETY: the raw pair's first edge; an `I31`'s bits.
+            unsafe { crate::raw::write_bits(cx, root.get(cx), 0, bits | 1) };
+            assert!(!cx.inner.remembered[number].is_set());
+            // SAFETY: as above; a young object's offset.
+            unsafe { crate::raw::write_bits(cx, root.get(cx), 0, bits) };
+            assert!(cx.inner.remembered[number].is_set());
+        });
     }
 
     #[derive(GcObject)]
@@ -2867,6 +3100,49 @@ mod tests {
         });
         heap.scavenge();
         drop(root);
+    }
+
+    /// While a GC given an engine's frames' roots runs, the verifier walks
+    /// from them too: an object only they reach, marked, isn't one the
+    /// roots no longer reach.
+    #[test]
+    fn the_verifier_walks_from_the_frames_roots() {
+        let (mut heap, root, data, _) = collected();
+        let next = heap
+            .inner
+            .ptr(data + std::mem::offset_of!(Pair, next))
+            .cast::<u32>();
+        // SAFETY: the root's `next`, a `Member` of a whole object.
+        let target = unsafe { next.read() };
+        // SAFETY: as above.
+        unsafe { next.write(0) };
+        heap.inner.frame_roots = vec![0, target | 1, target];
+        heap.inner.verify(None);
+        drop(root);
+    }
+
+    /// The same after a scavenge: a young object only the frames reach is
+    /// checked (here, found forwarded).
+    #[test]
+    #[should_panic = "is forwarded"]
+    fn the_verifier_walks_from_the_frames_young_roots() {
+        let mut heap = Heap::with_platform(
+            HeapOptions::default(),
+            std::sync::Arc::new(crate::InlinePlatform),
+        );
+        let data = heap.mutate(|cx| {
+            let young = cx.alloc(PairInit {
+                next: None,
+                value: Cell::new(1),
+            });
+            cx.inner
+                .offset_of(young.into_ref() as *const Pair as *const u8)
+        });
+        heap.inner.frame_roots = vec![data as u32];
+        heap.inner.verify_young();
+        // SAFETY: the young object's flags, in its header.
+        unsafe { heap.inner.header(data).add(1).write(1) };
+        heap.inner.verify_young();
     }
 
     /// A reachable object whose header says it was copied: a stale edge.

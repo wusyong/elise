@@ -453,6 +453,12 @@ impl Marker {
                 // SAFETY: an object of the type, its length (an array's)
                 // written before it was published, and fixed.
                 let edges = unsafe { ty.raw_edges(self.ptr(data)) };
+                // An `I31` is no object.
+                let mut visit = |at: usize, edge: u32| {
+                    if !crate::raw::is_i31(edge) {
+                        visit(at, edge);
+                    }
+                };
                 self.edges::<FENCE>(data, edges, &mut visit);
             }
         }

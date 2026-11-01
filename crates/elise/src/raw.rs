@@ -13,15 +13,29 @@
 //!
 //! An object is a `Gc<'gc, Erased>`: a `Persistent<Erased>` roots it, a
 //! `Member<Erased>` refers to it, `downcast` never finds a Rust type in it.
+//!
+//! A runtime type's edge holds none, an object, or a 31-bit integer in
+//! place of one (`I31`, wasm's `i31ref`): its bits shifted left by one, the
+//! lowest set, which no object's offset has. The GC skips those. An edge
+//! is read and written as a `Ref`, or as the bits it holds (`read_bits`,
+//! `write_bits`), the form a wasm engine's code keeps them in.
+//!
+//! The engine's code allocates and writes edges through bits outside any
+//! operation (`alloc_bits`, `write_bits_in`), on `&mut Heap`, so that none
+//! pays an operation's cost: an allocation never GCs, it fails as one is
+//! due, for the engine to run with its frames' roots
+//! (`Heap::safepoint_with_roots`). What it hands the embedder's code, an
+//! operation turns back into objects (`from_bits`).
 
 use std::fmt;
 use std::ptr::{self, NonNull};
 use std::sync::atomic::{AtomicU32, Ordering};
 
+use crate::heap::Inner;
 use crate::member::compress;
 use crate::page::HEADER_BYTES;
 use crate::types::{self, Finalizer, MAX_OBJECT_BYTES};
-use crate::{Erased, Gc, Mutation};
+use crate::{Erased, Gc, Heap, Mutation};
 
 /// How many indices the table has: every type's is below it, a static
 /// type's below `MAX_TYPES`, a runtime type's above.
@@ -35,8 +49,8 @@ pub const MAX_INDEX: u32 = types::TABLE_LEN as u32;
 pub struct Layout<'a> {
     /// Its bytes, an array's fixed part's (its elements follow).
     pub size: u32,
-    /// Its edges' offsets, ascending: each a 32-bit offset into the heap's
-    /// cage, 0 for none, 4-aligned, inside `size`.
+    /// Its edges' offsets, ascending, 4-aligned, inside `size`: each holds
+    /// a 32-bit offset into the heap's cage, 0 for none, or an `I31`.
     pub edges: &'a [u32],
     /// If it is an array, its elements.
     pub array: Option<ArrayLayout>,
@@ -231,12 +245,10 @@ impl Drop for TypeRange {
 /// If no runtime type has `index`, it is retired, or it is an array; if the
 /// cage is full.
 pub fn alloc<'gc>(cx: &Mutation<'gc>, index: u32) -> Gc<'gc, Erased> {
-    let entry = types::raw_entry(index);
-    assert!(
-        entry.array.is_none(),
-        "the GC type with index {index} is an array"
-    );
-    allocate(cx, index, entry.info.size() as usize, None)
+    let data = allocate(cx.inner, index, struct_size(index), None);
+    // SAFETY: the object just initialized (each edge null), in the cage,
+    // which no GC changes before `'gc` ends.
+    unsafe { object(cx, data) }
 }
 
 /// A new array of the runtime type with `index`, of `length` elements,
@@ -247,6 +259,75 @@ pub fn alloc<'gc>(cx: &Mutation<'gc>, index: u32) -> Gc<'gc, Erased> {
 /// If no runtime type has `index`, it is retired, or it isn't an array; if
 /// the cage is full.
 pub fn alloc_array<'gc>(cx: &Mutation<'gc>, index: u32, length: u32) -> Option<Gc<'gc, Erased>> {
+    let (size, length_at) = array_size(index, length)?;
+    let data = allocate(cx.inner, index, size, Some((length_at, length)));
+    // SAFETY: as `alloc`'s.
+    Some(unsafe { object(cx, data) })
+}
+
+/// Why `alloc_bits` or `alloc_array_bits` allocated nothing: wasmtime's
+/// `GcHeap::alloc_raw`'s two failures.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AllocError {
+    /// A GC is due, which the heap leaves to the engine, holding its
+    /// frames' roots (`Heap::safepoint_with_roots`); the allocation right
+    /// after it doesn't wait for another.
+    GcDue,
+    /// The array would be larger than an object may be.
+    TooLarge,
+}
+
+/// `alloc` for an engine's code, outside any operation: the object's bits.
+/// It never GCs.
+///
+/// # Errors
+///
+/// `GcDue` if a GC is due.
+///
+/// # Panics
+///
+/// As `alloc`.
+pub fn alloc_bits(heap: &mut Heap, index: u32) -> Result<u32, AllocError> {
+    let size = struct_size(index);
+    let inner = heap.for_bits().ok_or(AllocError::GcDue)?;
+    Ok(bits_of(allocate(inner, index, size, None)))
+}
+
+/// `alloc_array` for an engine's code, as `alloc_bits`.
+///
+/// # Errors
+///
+/// `TooLarge` if the array would be larger than an object may be, else
+/// `GcDue` if a GC is due.
+///
+/// # Panics
+///
+/// As `alloc_array`.
+pub fn alloc_array_bits(heap: &mut Heap, index: u32, length: u32) -> Result<u32, AllocError> {
+    let (size, length_at) = array_size(index, length).ok_or(AllocError::TooLarge)?;
+    let inner = heap.for_bits().ok_or(AllocError::GcDue)?;
+    Ok(bits_of(allocate(
+        inner,
+        index,
+        size,
+        Some((length_at, length)),
+    )))
+}
+
+/// The size of a struct of the runtime type with `index`.
+fn struct_size(index: u32) -> usize {
+    let entry = types::raw_entry(index);
+    assert!(
+        entry.array.is_none(),
+        "the GC type with index {index} is an array"
+    );
+    entry.info.size() as usize
+}
+
+/// The size of an array of the runtime type with `index`, of `length`
+/// elements, and where its length is: `None` if it would be larger than an
+/// object may be.
+fn array_size(index: u32, length: u32) -> Option<(usize, u32)> {
     let entry = types::raw_entry(index);
     let array = entry
         .array
@@ -255,19 +336,34 @@ pub fn alloc_array<'gc>(cx: &Mutation<'gc>, index: u32, length: u32) -> Option<G
         .checked_mul(array.element_bytes as usize)?
         .checked_add(entry.info.size() as usize)
         .filter(|&size| size.saturating_add(HEADER_BYTES) <= MAX_OBJECT_BYTES)?;
-    Some(allocate(cx, index, size, Some((array.length_at, length))))
+    Some((size, array.length_at))
+}
+
+/// An object's bits: its data's offset.
+fn bits_of(data: usize) -> u32 {
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "an offset in the cage, below CAGE_BYTES = 2^32"
+    )]
+    let bits = data as u32;
+    bits
+}
+
+/// The object at `data`, in `cx`'s heap.
+///
+/// # Safety
+///
+/// A live object's data offset, which no GC moves before `'gc` ends.
+unsafe fn object<'gc>(cx: &Mutation<'gc>, data: usize) -> Gc<'gc, Erased> {
+    // SAFETY: as the caller promises; the cage's base isn't null.
+    unsafe { Gc::from_raw(NonNull::new_unchecked(cx.inner.ptr(data).cast())) }
 }
 
 /// An object of `size` bytes of the runtime type with `index`, zeroed, an
-/// array's `length` written at its offset.
-fn allocate<'gc>(
-    cx: &Mutation<'gc>,
-    index: u32,
-    size: usize,
-    length: Option<(u32, u32)>,
-) -> Gc<'gc, Erased> {
-    let data = cx.inner.allocate(size, 0, false);
-    let ptr = cx.inner.ptr(data);
+/// array's `length` written at its offset: its data's offset.
+fn allocate(inner: &Inner, index: u32, size: usize, length: Option<(u32, u32)>) -> usize {
+    let data = inner.allocate(size, 0, false);
+    let ptr = inner.ptr(data);
     // SAFETY: the object's bytes, just allocated in a committed page, which
     // nothing reads before it is published; an array's length is a `u32`
     // of them, 4-aligned (its layout's, checked), as the data is 8-aligned.
@@ -277,10 +373,96 @@ fn allocate<'gc>(
             ptr.add(at as usize).cast::<u32>().write(length);
         }
     }
-    cx.inner.publish(data, index, 0, Finalizer::None);
-    // SAFETY: the object just initialized (each edge null), in the cage,
-    // which no GC changes before `'gc` ends.
-    unsafe { Gc::from_raw(NonNull::new_unchecked(ptr.cast())) }
+    inner.publish(data, index, 0, Finalizer::None);
+    data
+}
+
+/// A 31-bit integer an edge holds in place of an object (wasm's `i31ref`,
+/// as wasmtime's `I31`): as bits, the integer shifted left by one, the
+/// lowest bit set, which no object's offset has (each is 4-aligned).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct I31(u32);
+
+impl I31 {
+    /// The low 31 bits of `value`.
+    pub fn wrapping_u32(value: u32) -> Self {
+        Self(value & I31_MAX)
+    }
+
+    /// The low 31 bits of `value`.
+    pub fn wrapping_i32(value: i32) -> Self {
+        Self::wrapping_u32(value.cast_unsigned())
+    }
+
+    /// `value`, if it fits in 31 bits unsigned.
+    pub fn new_u32(value: u32) -> Option<Self> {
+        (value <= I31_MAX).then_some(Self(value))
+    }
+
+    /// `value`, if it fits in 31 bits signed.
+    pub fn new_i32(value: i32) -> Option<Self> {
+        let wrapped = Self::wrapping_i32(value);
+        (wrapped.get_i32() == value).then_some(wrapped)
+    }
+
+    /// The integer, zero-extended.
+    pub fn get_u32(self) -> u32 {
+        self.0
+    }
+
+    /// The integer, sign-extended.
+    pub fn get_i32(self) -> i32 {
+        // The 31 bits at the top, then an arithmetic shift back.
+        (self.0 << 1).cast_signed() >> 1
+    }
+
+    /// As an edge holds it.
+    fn bits(self) -> u32 {
+        (self.0 << 1) | 1
+    }
+}
+
+/// The largest `I31`, unsigned.
+const I31_MAX: u32 = u32::MAX >> 1;
+
+/// Whether an edge's `bits` are an `I31`'s rather than an object's offset
+/// (or none): what the GC skips.
+#[inline]
+pub(crate) fn is_i31(bits: u32) -> bool {
+    bits & 1 != 0
+}
+
+/// What a runtime type's edge that isn't none holds.
+#[derive(Clone, Copy, Debug)]
+pub enum Ref<'gc> {
+    Object(Gc<'gc, Erased>),
+    I31(I31),
+}
+
+impl<'gc> From<Gc<'gc, Erased>> for Ref<'gc> {
+    fn from(object: Gc<'gc, Erased>) -> Self {
+        Self::Object(object)
+    }
+}
+
+impl From<I31> for Ref<'_> {
+    fn from(value: I31) -> Self {
+        Self::I31(value)
+    }
+}
+
+/// `value` as an edge's bits: 0 for none, an object's offset in `cx`'s
+/// cage, or an `I31`'s.
+///
+/// # Panics
+///
+/// If `value` is an object of another heap.
+pub fn bits<'gc>(cx: &Mutation<'gc>, value: Option<Ref<'gc>>) -> u32 {
+    match value {
+        None => 0,
+        Some(Ref::Object(object)) => compress(cx, Some(object)),
+        Some(Ref::I31(value)) => value.bits(),
+    }
 }
 
 /// The index of `object`'s type.
@@ -318,18 +500,38 @@ pub unsafe fn read_edge<'gc>(
     cx: &Mutation<'gc>,
     object: Gc<'gc, Erased>,
     at: u32,
-) -> Option<Gc<'gc, Erased>> {
+) -> Option<Ref<'gc>> {
     // SAFETY: as the caller promises.
-    let raw = unsafe { edge(cx, object, at) }.load(Ordering::Relaxed);
-    // SAFETY: a non-null edge of a live object of `cx`'s heap is a live
-    // object (set only from a `Gc<'gc, _>`, and marked through).
-    (raw != 0)
-        .then(|| unsafe { Gc::from_raw(NonNull::new_unchecked(cx.inner.ptr(raw as usize).cast())) })
+    let bits = unsafe { read_bits(cx, object, at) };
+    // SAFETY: an object's offset in an edge of a live object of `cx`'s heap
+    // is a live object (written only as one, and marked through).
+    unsafe { from_bits(cx, bits) }
+}
+
+/// What `bits` hold: none, an `I31`, or an object of `cx`'s heap. How an
+/// operation takes what an engine's code holds as bits (a wasm function's
+/// argument to a host function).
+///
+/// # Safety
+///
+/// `bits` are 0, an `I31`'s (odd), or the offset of a live object of
+/// `cx`'s heap: one the engine's frames hold (a GC given their roots kept
+/// it, and none runs before `'gc` ends), or what `bits` or `read_bits`
+/// gave in this operation.
+pub unsafe fn from_bits<'gc>(cx: &Mutation<'gc>, bits: u32) -> Option<Ref<'gc>> {
+    if bits == 0 {
+        None
+    } else if is_i31(bits) {
+        Some(Ref::I31(I31(bits >> 1)))
+    } else {
+        // SAFETY: as the caller promises.
+        Some(Ref::Object(unsafe { object(cx, bits as usize) }))
+    }
 }
 
 /// Sets the edge at `at` of `object`, a runtime type's, with the barriers
 /// a `Member`'s `set` has: the generational one, and a marking's (the old
-/// value marked).
+/// value marked); neither for an `I31`.
 ///
 /// # Safety
 ///
@@ -342,11 +544,72 @@ pub unsafe fn write_edge<'gc>(
     cx: &Mutation<'gc>,
     object: Gc<'gc, Erased>,
     at: u32,
-    value: Option<Gc<'gc, Erased>>,
+    value: Option<Ref<'gc>>,
 ) {
-    let raw = compress(cx, value);
+    let bits = bits(cx, value);
+    // SAFETY: as the caller promises; `bits` none, an `I31`'s, or a live
+    // object's of `cx`'s heap (from a `Gc<'gc, _>`).
+    unsafe { write_bits(cx, object, at, bits) };
+}
+
+/// The bits the edge at `at` of `object`, a runtime type's, holds: 0 for
+/// none, an object's offset in the heap's cage, or an `I31`'s (odd).
+///
+/// # Safety
+///
+/// As `read_edge`.
+///
+/// # Panics
+///
+/// If `object` is another heap's.
+pub unsafe fn read_bits<'gc>(cx: &Mutation<'gc>, object: Gc<'gc, Erased>, at: u32) -> u32 {
     // SAFETY: as the caller promises.
-    cx.inner.write_edge(unsafe { edge(cx, object, at) }, raw);
+    unsafe { edge(cx, object, at) }.load(Ordering::Relaxed)
+}
+
+/// Sets the edge at `at` of `object`, a runtime type's, to `bits`, with
+/// `write_edge`'s barriers.
+///
+/// # Safety
+///
+/// As `read_edge`; and `bits` is 0, an `I31`'s (odd), or the offset of an
+/// object of `cx`'s heap that is live (`bits` of a `Gc<'gc, _>`, or what
+/// `read_bits` read in this operation).
+///
+/// # Panics
+///
+/// If `object` is another heap's.
+pub unsafe fn write_bits<'gc>(cx: &Mutation<'gc>, object: Gc<'gc, Erased>, at: u32, bits: u32) {
+    // SAFETY: as the caller promises.
+    cx.inner
+        .write_raw_edge(unsafe { edge(cx, object, at) }, bits);
+}
+
+/// `read_bits` for an engine's code, outside any operation: `object` the
+/// bits of the object whose edge it reads.
+///
+/// # Safety
+///
+/// `object` is the offset of a live object of `heap` (one the engine's
+/// frames hold, as `from_bits`'s), and `at` one of the edges of its type's
+/// layout (a fixed part's, or an element's below its length).
+pub unsafe fn read_bits_in(heap: &Heap, object: u32, at: u32) -> u32 {
+    // SAFETY: as the caller promises.
+    unsafe { edge_in(heap.inner(), object, at) }.load(Ordering::Relaxed)
+}
+
+/// `write_bits` for an engine's code, outside any operation (wasmtime's
+/// `GcHeap::write_gc_ref`): `object` the bits of the object whose edge it
+/// sets, with the barriers.
+///
+/// # Safety
+///
+/// As `read_bits_in`; and `bits` is 0, an `I31`'s (odd), or the offset of
+/// a live object of `heap`.
+pub unsafe fn write_bits_in(heap: &mut Heap, object: u32, at: u32, bits: u32) {
+    let inner = heap.inner();
+    // SAFETY: as the caller promises.
+    inner.write_raw_edge(unsafe { edge_in(inner, object, at) }, bits);
 }
 
 /// The edge at `at` of `object`.
@@ -361,5 +624,19 @@ unsafe fn edge<'gc>(cx: &Mutation<'gc>, object: Gc<'gc, Erased>, at: u32) -> &'g
     // (its layout's, checked, from 8-aligned data), which no GC frees or
     // moves before `'gc` ends; an edge is only written atomically while
     // anything may read it so.
+    unsafe { AtomicU32::from_ptr(slot.cast()) }
+}
+
+/// The edge at `at` of the object at `object`, in `inner`'s cage.
+///
+/// # Safety
+///
+/// As `read_bits_in`.
+unsafe fn edge_in(inner: &Inner, object: u32, at: u32) -> &AtomicU32 {
+    let slot = inner.ptr(object as usize).wrapping_add(at as usize);
+    assert!(inner.cage.contains(slot), "an edge in the heap's cage");
+    // SAFETY: as `edge`'s: the caller promises an edge of a live object,
+    // which no GC frees or moves while `inner` is borrowed (a GC needs the
+    // heap's `&mut`).
     unsafe { AtomicU32::from_ptr(slot.cast()) }
 }

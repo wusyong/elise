@@ -114,10 +114,14 @@ GC 的每一步都在安全點開始和收尾（scavenge、full GC 和 marking �
 **I14 執行時的型別**（`crates/elise/src/raw.rs`、`crates/elise/src/types.rs` 的 `Runtime`）：embedder 執行時登記的型別的物件，GC 讀的只有 header、layout 列的邊和 array 的長度，都在物件裡；型別的 `Entry` 在 GC 還可能讀到它的物件的 header 時都還在。`raw` 有 `unsafe fn`：和 `from_engine`、`WrapperLocal::hand` 一樣，是給 embedder（wasm engine）的，它的契約由 embedder 守；safe 的部分（登記、配置、`data`、`index_of`）照樣不會造成 UB。
 - 登記時檢查 layout（`raw::check`）：大小加上 header 不超過物件的上限；邊 4-aligned、在大小以內、遞增（不重疊）；array 的長度是固定部分裡 4-aligned 的 `u32`、不是邊；元素是 1、2、4、8 或 16 bytes，固定部分對齊到它（最多 8）；元素是邊時是 4 bytes。物件的資料 8-aligned，所以每條邊都是對齊的 `AtomicU32`。`alloc_array` 的大小用 checked 算、不超過上限才配置，元素都在物件裡。
 - 配置（`raw::alloc`、`alloc_array`）先整個清成 0、寫長度，才 `publish`：每條邊是 0（I2），長度和配置的大小相符；沒有 drop glue（`Finalizer::None`），所以 sweep 和 heap 的 drop 不讀它們的型別。執行時的編號都在 `MAX_TYPES` 以上，`downcast` 不會把它們當成 Rust 的型別。
-- `unsafe` 的部分是 embedder 的契約：`write_edge`、`read_edge` 的 `at` 是物件的型別的邊（固定部分的，或長度以下的元素的），值是同一個 heap 的物件（`compress` 檢查值在 cage 裡，物件的格子也檢查在 cage 裡）；`write_edge` 經過和 `Member::set` 一樣的兩種 barrier（I3、I10）。經過 `data` 的指標寫資料時不碰邊和長度：邊只經過 atomic 寫，marker 和 mutator 同時碰的還是只有邊（I4）；長度從配置之後不改，scavenge、marker 照它算大小和元素。
+- `unsafe` 的部分是 embedder 的契約：`write_edge`、`read_edge`、`write_bits`、`read_bits` 的 `at` 是物件的型別的邊（固定部分的，或長度以下的元素的），物件的格子檢查在 cage 裡；`write_edge` 的值是 none、`I31` 或同一個 heap 的物件（`compress` 檢查在 cage 裡），`write_bits` 的 bits 是 0、`I31` 的（奇數），或同一個 heap 的活的物件的 offset（`bits` 從 `Gc` 算的、這次操作裡 `read_bits` 讀到的），由 embedder 保證。兩者都經過 `Inner::write_raw_edge`：和 `Member::set` 一樣的兩種 barrier（I3、I10），`I31` 除外（下一點）。經過 `data` 的指標寫資料時不碰邊和長度：邊只經過 atomic 寫，marker 和 mutator 同時碰的還是只有邊（I4）；長度從配置之後不改，scavenge、marker 照它算大小和元素。
 - 退休（`TypeRange::retire`，`unsafe`）的契約是之後（包括同時）不再配置這個型別，而且沒有它的物件到得了（root、weak root、邊、weak 的邊、id）。之後 GC 讀它的物件的型別只在：進行中的 marking 的快照、scavenge 經過死掉的 old 物件的 slot set 的格子 copy 它的年輕物件、heap verifier 走 nursery 的頁。退休記下每個活著的 heap 已經開始的 full GC 的次數加一，每個 heap 做完那麼多次（sweep 做完，`Inner::sweep_done` 的最後）或被 drop 之後才釋放 `Entry`：那次 full GC 在退休之後開始，它的快照到不了這些物件，開始時的 scavenge 把 nursery 清空（升上去的這些物件沒標到），它的 sweep 把它們都釋放了；之後沒有這個型別的物件，也不會再有（退休之後建的 heap 沒有，不用等）。計數在 full GC 開始時（`finish_sweeping` 之後）和 sweep 做完時、在 `Runtime` 的鎖底下改，退休在同一個鎖底下讀，所以和別的 thread 上的 GC 的先後是確定的：同時開始的那次算在退休之前，多等一次。
 - 釋放之前那一格不給別的型別（`register_raw` 在鎖底下看到不是空的就拒絕），釋放和重新登記都在鎖底下；`raw_entry` 檢查退休的旗標，只抓照順序犯的錯，同時配置的由退休的契約排除。
 - 一段編號（`TypeRange`）丟掉時，空的格子馬上還回去，退休的等釋放之後才還，還登記著的永遠不還（不是 UB：那些格子一直有效，只是浪費）。
+- 執行時的型別的邊可能放著 31 位元的整數（`I31`，wasm 的 `i31ref`）：整數左移一位、最低位元設成 1，物件的 offset 都 4-aligned，所以 `raw::is_i31`（最低位元）分得開。GC 讀執行時的型別的邊的地方都先跳過它：marker、scavenge 掃物件、verifier 的三處。slot set 的格子不知道是哪一種物件的，記下之後可能被寫成 `I31`，所以 scavenge 的 `evacuate` 對每個值都跳過（Rust 的型別的邊只有 0 和物件的 offset，多一次位元的檢查）。寫邊的 barrier 新值是 `I31` 時不記 slot set、舊值是 `I31` 時不經過 SATB。Rust 的型別的邊（`Member`）不放 `I31`，它們的路不檢查。
+- 不經過操作的入口（`alloc_bits`、`alloc_array_bits`、`write_bits_in` 要 `&mut Heap`，`read_bits_in` 要 `&Heap`）：呼叫時沒有操作在進行、也沒有 `Gc<'gc>` 活著；配置從不 GC（GC 該做時回 `GcDue`），所以呼叫中沒有東西搬動或釋放。配置和 `alloc` 共用 `allocate`（清零、寫長度、`publish`）。回的 bits 只是數字：safe 的程式拿它做不了什麼，用它都經過 `unsafe` 的入口。`read_bits_in`、`write_bits_in` 的契約同 `read_bits`、`write_bits`，物件改用 bits 給：`edge_in` 檢查格子在 cage 裡，寫經過 `Inner::write_raw_edge`。`from_bits` 的契約是 bits 是 0、`I31` 的，或一個活物件的 offset（frame 拿著的：交出 root 的 GC 留著它、寫回了新的 bits，操作裡不會 GC）。
+- 交出 root 的 GC（`safepoint_with_roots`、`scavenge_with_roots`、`collect_with_roots`，`unsafe`）：契約是每個 root 是 0、`I31` 的或這個 heap 的活物件的 offset，第二次交的和第一次的一樣（數目不同就 panic；順序錯了寫回的是錯的數字，那是 embedder 的值，之後經過 `unsafe` 的入口才會用到）。它們也在 `&mut Heap` 上、不在操作裡，和 `collect` 一樣是安全點。root 的 bits 在 GC 期間放在 `Inner::frame_roots`：scavenge 把它們接在 root 表的格子後面，經過 `evacuate`（跳過 0 和 `I31`）更新，做完分回去（I3、I10）；marking 開始時經過 `root_offsets` 跳過 0 和 `I31` 再標，verifier 也從它們走；收尾不讀：frame 在開始之後拿到的物件是快照裡的（SATB 保住）、新配置的（黑的）或 young 的（old 的 marking 不判斷），frame 的格子被覆寫不經過 barrier，等於刪掉一個開始時就標了的 root（TLA+ 的模型裡拿掉刪 root 的 barrier 也不漏標）。
+- frame 的狀態（`enter_frames`）和 safe 的程式的 soundness 無關：它只讓安全點少做 GC，守的是 embedder 的 bits（frame 裡安全點自己開始的 GC 看不到它們）；`collect`、`scavenge` 在 frame 裡 panic，免得 embedder 用錯。
 ## 找到並修正過的問題
 
 - **Mark 把每個欄位都當成 `u32` 讀**（原型，Miri 抓到）：一般資料的欄位可能有 padding，讀到沒初始化的位元組是 UB。改成只讀 layout 裡標成 `Member` 的欄位（I4）。
@@ -135,7 +139,7 @@ GC 的每一步都在安全點開始和收尾（scavenge、full GC 和 marking �
 - **Verus**：頁的 bitmap 搜尋（`crates/elise/src/bits.rs`）證明對任何長度的 bitmap，空區段剛好是所有最長的連續的 0、由低到高、互不相連（I1 的「配置只從空區段拿」靠它）。信任的是 Verus、Z3 和 `vstd` 的公理（例如 `u64::trailing_zeros` 的規格）。
 - **fuzz**：對著不回收的參考模型跑隨機的操作，`cfg(fuzzing)` 下空的格子和頁對 ASan 毒化，讀到死物件時當場停下（讀出的值沒被用到時，`0xdb` 的毒值看不出來）。找到的輸入縮小後由 `cargo test` 和 Miri 重播。
 - **Debug 的毒值**：sweep 把死掉的物件填上 `0xdb`，scavenge 把整頁 from-space 填上 `0xdb`，漏標或沒更新的邊在測試裡讀到的是毒值、不是舊的物件。
-- **Mutation test**：弄壞 mark、sweep、finalizer、配置、`Member`、`Persistent`、`HeapVector`、derive、write barrier、scavenge、concurrent marking（barrier、black allocation、開始和收尾、取消）、weak（layout、記下、收尾和 scavenge 的清除、兩種 barrier）、ephemeron（layout、標 value 或記下、固定點、收尾和 scavenge 的清除、barrier）、id 表（young 的清單、清除和放掉塊、型別的比對、讀取的 barrier）和執行時的型別（layout 的每一條檢查、配置的清零和長度、marker、scavenge 和 verifier 走的邊、兩種 barrier、退休等的 GC 和它的計數、編號的保留和歸還），確認有測試失敗；結果記在進度的文件裡。
+- **Mutation test**：弄壞 mark、sweep、finalizer、配置、`Member`、`Persistent`、`HeapVector`、derive、write barrier、scavenge、concurrent marking（barrier、black allocation、開始和收尾、取消）、weak（layout、記下、收尾和 scavenge 的清除、兩種 barrier）、ephemeron（layout、標 value 或記下、固定點、收尾和 scavenge 的清除、barrier）、id 表（young 的清單、清除和放掉塊、型別的比對、讀取的 barrier）和執行時的型別（layout 的每一條檢查、配置的清零和長度、marker、scavenge 和 verifier 走的邊、兩種 barrier、退休等的 GC 和它的計數、編號的保留和歸還、`I31` 的編碼和 marker、scavenge、verifier、barrier 跳過它、frame 裡的安全點不做 GC、交出 root 的 GC 讀和寫回 root、scavenge 和 marking 的開始用它們、bits 的配置什麼時候失敗、bits 的寫的 barrier），確認有測試失敗；結果記在進度的文件裡。
 
 ## 需要人工審查的地方
 
@@ -222,7 +226,8 @@ GC 的每一步都在安全點開始和收尾（scavenge、full GC 和 marking �
 
 - `check` 的每一條都對應 I14 的一個前提（mutation test 逐條拿掉過）；layout 加新的能力時先加檢查。
 - `allocate` 先清零、寫長度，才 `publish`；`alloc_array` 的大小是 checked 的。
-- `write_edge` 只經過 `Inner::write_edge`；`edge` 檢查格子在 cage 裡。
+- `write_edge`、`write_bits` 只經過 `Inner::write_raw_edge`；`edge` 檢查格子在 cage 裡。GC 新增讀執行時的型別的邊的地方，要先用 `raw::is_i31` 跳過 `I31`；scavenge 經過 `evacuate` 的值都已經跳過。
+- 不經過操作的入口（`alloc_bits`、`write_bits_in` 等）都在 `&mut Heap` 或 `&Heap` 上、從不 GC；`write_bits_in` 只經過 `Inner::write_raw_edge`，`edge_in` 檢查格子在 cage 裡。GC 新增讀 root 的地方（root 表之外），要一起讀 `Inner::frame_roots`（`root_offsets`、scavenge 的 root）；新增會在 frame 裡開始 GC 的路，要先拿到 frame 的 root。
 - 退休等的計數：`gc_started` 在每個 full GC 的開始（`Inner::collect`、`start_marking_with` 的 `finish_sweeping` 之後），`gc_finished` 在 `sweep_done` 的最後。新增開始 full GC 的路、讓 sweep 或 heap 的 drop 讀到執行時的型別（例如給它們 drop glue）、或讓 GC 在別的時候讀死物件的 header 時，要重新看 I14 的論證。
 
 ### `crates/elise/src/token.rs`：token 的 cell（I12）

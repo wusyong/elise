@@ -399,6 +399,25 @@ impl Inner {
         self.write_barrier(edge.as_ptr().cast(), raw);
     }
 
+    /// `write_edge` for a runtime type's edge, which may hold an `I31`
+    /// (`raw`): neither barrier takes one, as it is no object; an old
+    /// value that is one isn't marked.
+    #[inline]
+    pub(crate) fn write_raw_edge(&self, edge: &std::sync::atomic::AtomicU32, raw: u32) {
+        if self.marking_active.get() {
+            let old = edge.load(StdOrdering::Relaxed);
+            if !crate::raw::is_i31(old) {
+                self.satb(old);
+            }
+            edge.store(raw, StdOrdering::Release);
+        } else {
+            edge.store(raw, StdOrdering::Relaxed);
+        }
+        if !crate::raw::is_i31(raw) {
+            self.write_barrier(edge.as_ptr().cast(), raw);
+        }
+    }
+
     /// Records the old edge at `slot` in its page's (or large object's)
     /// slot set.
     pub(super) fn remember(&self, slot: usize) {
@@ -466,7 +485,11 @@ impl Inner {
                 _ => unreachable!("a slot set is an old page's"),
             })
             .collect();
-        let roots = self.shared.roots.take_entries();
+        // The root table's entries, then an engine's frames' (none and
+        // `I31`s, which `evacuate` skips, among them).
+        let mut roots = self.shared.roots.take_entries();
+        let table_roots = roots.len();
+        roots.extend_from_slice(&self.frame_roots);
         let sites = self.sites.get_mut().len();
         // The slot sets' pages for any thread to take, in whole segments;
         // the rest the joining thread's, with the roots: a worker isn't
@@ -503,9 +526,11 @@ impl Inner {
         assert!(!job.worklist.poisoned(), "a thread that scavenged panicked");
         let scanned_by_workers = job.scanned_by_workers.load(Ordering::Relaxed);
         let slot_pages_by_workers = job.slot_pages_by_workers.load(Ordering::Relaxed);
-        let roots = sync::into_inner(job.roots);
+        let mut roots = sync::into_inner(job.roots);
         let copiers = sync::into_inner(job.copiers);
         let Source { to_pages, to, .. } = sync::into_inner(job.source);
+        self.frame_roots.copy_from_slice(&roots[table_roots..]);
+        roots.truncate(table_roots);
         self.shared.roots.put_entries(roots);
         let mut record = ScavengeRecord {
             scanned_by_workers,
@@ -937,8 +962,10 @@ impl Scavenging<'_> {
         value: u32,
     ) -> (u32, bool) {
         let data = value as usize;
-        if value == 0 {
-            return (0, false);
+        // None, or an `I31` (a runtime type's edge may hold one, a slot set
+        // may name such an edge written since): no object.
+        if value == 0 || crate::raw::is_i31(value) {
+            return (value, false);
         }
         if !self.in_from(data) {
             // Old, or a copy in to-space already: a slot set's page may be
