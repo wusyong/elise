@@ -918,3 +918,32 @@ fn a_heap_that_moves_keeps_its_roots() {
     drop((root, copy));
     assert_eq!(heap.roots(), 0);
 }
+
+/// Fields named as the derive's own parameters: each written where it is
+/// (a field's binding doesn't shadow them).
+#[derive(GcObject)]
+struct Named {
+    init: Cell<u32>,
+    slot: Member<Small>,
+}
+
+#[test]
+fn fields_may_have_any_name() {
+    let mut heap = old_heap();
+    let named = heap.mutate(|cx| {
+        let small = cx.alloc(SmallInit {
+            value: Cell::new(7),
+        });
+        let named = cx.alloc(NamedInit {
+            init: Cell::new(3),
+            slot: Some(small),
+        });
+        Persistent::new(cx, named)
+    });
+    heap.collect();
+    heap.mutate(|cx| {
+        let named = named.get(cx);
+        assert_eq!(named.init.get(), 3);
+        assert_eq!(named.slot.get(cx).map(|small| small.value.get()), Some(7));
+    });
+}

@@ -84,7 +84,7 @@ dependencies = [
 
 [[package]]
 name = "elise"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "elise-derive",
  "loom",
@@ -97,7 +97,7 @@ dependencies = [
 
 [[package]]
 name = "elise-derive"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "proc-macro2",
  "quote",

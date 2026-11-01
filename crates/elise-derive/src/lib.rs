@@ -105,9 +105,11 @@ fn expand(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
         unsafe impl ::elise::GcObject for #name {
             type Init<'gc> = #init<'gc>;
 
-            fn __init<'gc>(init: #init<'gc>, slot: ::elise::InitSlot<'_, 'gc, Self>) {
-                let #init { #( #names, )* } = init;
-                #( slot.field::<#types>(::core::mem::offset_of!(#name, #names), #names); )*
+            // The parameters' names a field can't have (a field's binding
+            // would shadow them).
+            fn __init<'gc>(__gc_init: #init<'gc>, __gc_slot: ::elise::InitSlot<'_, 'gc, Self>) {
+                let #init { #( #names, )* } = __gc_init;
+                #( __gc_slot.field::<#types>(::core::mem::offset_of!(#name, #names), #names); )*
             }
         }
 
