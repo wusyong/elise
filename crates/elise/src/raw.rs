@@ -26,6 +26,9 @@
 //! due, for the engine to run with its frames' roots
 //! (`Heap::safepoint_with_roots`). What it hands the embedder's code, an
 //! operation turns back into objects (`from_bits`).
+//!
+//! An engine whose heap only its code uses owns an `EngineHeap`: the same,
+//! with no operation, so that it moves between threads as its owner does.
 
 use std::fmt;
 use std::ptr::{self, NonNull};
@@ -36,6 +39,10 @@ use crate::member::compress;
 use crate::page::HEADER_BYTES;
 use crate::types::{self, Finalizer, MAX_OBJECT_BYTES};
 use crate::{Erased, Gc, Heap, Mutation};
+
+mod engine;
+
+pub use engine::{CAGE_BYTES, EngineHeap};
 
 /// How many indices the table has: every type's is below it, a static
 /// type's below `MAX_TYPES`, a runtime type's above.

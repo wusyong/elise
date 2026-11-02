@@ -14,6 +14,8 @@
 #[cfg(not(any(loom, shuttle)))]
 mod concurrent;
 #[cfg(not(any(loom, shuttle)))]
+mod engine;
+#[cfg(not(any(loom, shuttle)))]
 mod ephemeron;
 #[cfg(not(any(loom, shuttle)))]
 mod fragmentation;

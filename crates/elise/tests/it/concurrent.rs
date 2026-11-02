@@ -139,9 +139,14 @@ pub(crate) fn stepping_heap(nursery_bytes: usize) -> (Heap, Arc<Stepping>) {
 }
 
 pub(crate) fn stepping_heap_with(options: HeapOptions) -> (Heap, Arc<Stepping>) {
+    let (platform, steps) = stepping_platform();
+    (Heap::with_platform(options, platform), steps)
+}
+
+/// A platform on a `Stepping`, for a heap of the test's to make.
+pub(crate) fn stepping_platform() -> (Arc<dyn Platform>, Arc<Stepping>) {
     let steps = Arc::new(Stepping::default());
-    let heap = Heap::with_platform(options, Arc::new(Steps(steps.clone())));
-    (heap, steps)
+    (Arc::new(Steps(steps.clone())), steps)
 }
 
 /// Garbage in the old generation until a marking starts.

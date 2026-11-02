@@ -795,7 +795,7 @@ impl Heap {
         HeapStats {
             gcs: self.inner.gcs.get(),
             scavenges: self.inner.scavenges.get(),
-            used_bytes: self.inner.used.get().saturating_add(young_bytes),
+            used_bytes: self.inner.used_bytes(),
             young_bytes,
             nursery_bytes: self.inner.young.borrow().capacity_bytes(),
             committed_bytes: self.inner.space.borrow().committed_total,
@@ -1150,6 +1150,11 @@ impl<'gc> Mutation<'gc> {
 }
 
 impl Inner {
+    /// `HeapStats::used_bytes`.
+    pub(crate) fn used_bytes(&self) -> usize {
+        self.used.get().saturating_add(self.young_used.get())
+    }
+
     /// Whether a JS engine drives the heap (`HeapOptions::driven`).
     pub(crate) fn is_driven(&self) -> bool {
         self.options.driven
