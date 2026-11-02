@@ -93,3 +93,40 @@ python3 tla/unified/check.py [--mutation NAME]                  # 和 JS engine 
 ```
 
 `tla/marking/` 是 concurrent marking 的協定：`Satb.tla`（SATB 和 black allocation）、`SatbYoung.tla`（實作的協定，加上 young generation、weak 和 ephemeron）、`Dijkstra.tla`（V8 的 Dijkstra barrier，對照用）。`tla/unified/Unified.tla` 是 elise 的 marking 和 V8 的在同一次 major GC 裡一起做（I11）。每個 `check.py` 用 TLC 檢查模型本身成立，再拿掉每一部分（`Mutation`）確認 TLC 找得到它列出的反例。TLC 從 TLA+ tools 的 release 下載（版本和 SHA-256 釘在 `check.py`，放在 `target/tla/`），要有 Java（`PATH` 上的 `java`、`JAVA_HOME`，或 `--java`）。改到 barrier、black allocation、marking 的開始和收尾、scavenge 和 marking 的交錯、weak 或 ephemeron 的處理，或和 engine 之間的協定時，先改模型再改程式。
+
+## 測試守不住的地方
+
+測試沒有守住、只靠審查或之後才補的地方。改到它們時照這裡的理由看一次。
+
+### 只靠審查
+
+| 項目 | 為什麼測不到 | 現在靠什麼 | 之後怎麼處理 |
+| --- | --- | --- | --- |
+| `Marker::retire` 等進行中的交接做完才返回（engine 的 thread 正在 `hand` 裡、已經看過 marker 開著，heap 收尾或丟掉要等它設完 mark bit） | 漏掉的只是一個交錯：交接看過開著之後、設 mark bit 之前，heap 就收尾並釋放了頁；後果是寫到釋放的記憶體，測試看不到（拿掉等待的 mutation 沒有測試失敗） | 審查：交接先加計數再看開著沒，`retire` 先關再等計數歸零，都是 SeqCst（`soundness.md` 的 I11） | 用 shuttle 排出這個交錯，讓 heap 在 marker 的 mark table 還有交接時改用會檢查的 debug 版（例如 drop 時把它毒化），或在 Miri 底下跑這個交錯 |
+| slot set 第一次配置 bitmap 時，CAS 輸的 thread 丟掉自己的、用贏家的（`page::SlotSet::insert`） | 兩個 scavenge 的 thread 同時第一次記同一頁才會碰到；slot set 用 std 的 atomic（一張每頁一格的表，每個 heap 一萬多格，換成 shuttle 的 atomic 會讓每個排程都建一萬多個），shuttle 不在它上面切換 thread，loom 的模型只有 forwarding | 審查 | 把 `SlotSet` 寫成對 atomic 泛型（像 `forward` 的 `HeaderWord`），加一個 loom 的模型：兩個 thread 同時記同一頁的不同格，兩格都在 |
+| concurrent marking 的發布順序：marking 中寫邊和 weak 的邊用 release（`Inner::write_edge`、`write_weak`）、背景的 marker 讀一批邊（和 weak 的邊）之後的 acquire fence（`Marker::edges`）、頁進 `MarkTable` 用 release（`MarkTable::insert`） | 換成 relaxed 或拿掉 fence，要 marker 正好在 mutator 那幾個指令之間讀到邊、CPU 又真的重排了才會出錯，測試排不出來；heap 的邊是 cage 裡的 std 的 atomic，loom 管不到 | loom 的模型（同樣的順序的複本：換成 relaxed 或拿掉 fence 時找得到 marker 看到沒標的物件）、審查 | 把寫邊和讀一批邊的順序寫成對 atomic 泛型的小函式（像 scavenge 的 `forward` 的 `HeaderWord`），loom 的模型呼叫同一段 |
+| `HeapData` impl 和 derive 產生的 layout（G1、G2）、測試沒走到的 `unsafe` 路徑、cage 滿了的路徑 | `HeapData` 錯了（型別其實有指標或 drop glue）不是當下的 UB；Miri 只檢查測試走到的路徑；填滿 4 GiB 的 cage 太慢 | `soundness.md` 的「需要人工審查的地方」、compile-fail 測試、mutation test、測試在 Miri 下跑；cage 滿了由單元測試把下一頁設成最後一頁 | fuzz（`scripts/test.py fuzz`，錄製當種子、對著參考模型）涵蓋更多路徑，找到的 regression 在 Miri 下重播；頁的 bitmap 搜尋已經由 Verus 證明，之後把壓縮指標、配置的帳也放進 `verus!` |
+| marking 期間的 overshoot margin 不超過 cage 在門檻之外剩下的一半，在 marking 開始時算好、到收尾不變（`Inner::overshoot_margin`，照 V8 的 `old_generation_overshoot_margin`） | 要碰到這個上限，old 要先長到 cage（4 GiB）的一半左右，一般的 build 不跑；Miri 下的 cage 只有 16 MiB，預設的 32 MiB 的 margin 才會碰到它，只在 Miri 下編的 `concurrent::the_margin_is_at_most_half_of_the_cage_left` 測它（mutation test 用 Miri 跑過：上限放寬、跟著 old 長大重算都抓到），但 Miri 每週才跑一次，`cargo test` 抓不到 | CI 每週的 Miri、審查；margin 的其他部分（門檻的一半、`min_overshoot_bytes`、沒在 marking 時不加）由 `concurrent::` 的測試和 mutation test 守住 | 讓 cage 的大小可以在測試裡縮小，一般的 build 也測得到 |
+| 新的 GC 的頁的 `Marks` 不放在 `Box` 裡（`page::OwnedMarks`）：`MarkTable` 另外指向它，`Box` 每次跟著頁搬都在 Stacked Borrows 下重新宣稱唯一，那個指標就失效 | 一般的 build 不出事（`Box` 的 `noalias` 只用在函式參數上），只有 Miri 看得出來；Miri 每週才跑一次，改回 `Box` 的 mutation test 要跑 Miri，沒做 | CI 每週的 Miri（收尾時它找到原本的寫法）、`soundness.md` 的論證 | 審查：不要把 `OwnedMarks` 換回 `Box`，其他被 `MarkTable` 這類表另外指著的配置也一樣 |
+| 新的 GC 真的把空頁的記憶體還給作業系統（`Cage::discard` 和 worker 上的 `Discarder::discard`），和 verifier 對 worker 正在還的那一頁的判斷（`Discards` 的 `busy`） | 還掉的頁之後會重新 commit，讀到的是 0，但配置都會寫滿物件，測試看不出記憶體有沒有還；要看作業系統的 resident（`mincore`、task 的統計），測試不碰。`busy` 只在 worker 和 verifier 同時跑的那一刻有差（漏了它，verifier 偶爾誤報：做的時候在 pool 上的測試看到過） | 審查；heap 這一側的帳（頁的狀態、committed、拿回來的時機）由 `heap::` 的測試和 mutation test 守住 | kun 的 `gc_bench` 的報告有 resident，之後在它的測試裡檢查 GC 之後 resident 降下來 |
+
+### 沒有計數守著的優化
+
+拿掉之後結果一樣、只是變慢或多用記憶體，測試抓不到；每一條寫了要數什麼才守得住。
+
+- **marking 發布一段時叫醒 worker**（`Platform`，呼叫的 thread 的 `notify_concurrency_increase`）：不叫醒時結果一樣，只是 worker 只在 `run` 一開始被叫醒、剛好看到已經發布的段時才幫忙，幾乎變成單 thread。`workers_help_with_a_wide_graph` 只要五次 GC 裡有一次 worker 幫忙就過，抓不到。要數：每次 GC 有多少段被 worker 拿走，或者 worker 被叫醒的次數。
+- **新的 GC 的平行 marking 怎麼分工**（`worklist`、`ThreadPool`）：一段 512 項（cppgc 的大小）、發布一段只叫醒一個 worker、開工時沒有段可以拿就不叫醒。改回一段 64 項、`notify_all`、開工時一律叫醒，結果一樣，只是窄的圖（kun 的 `gc_bench` 的 tree：一串 128 個物件的小樹）被切給 worker，拿的成本比標的多，比單 thread 慢 5 倍，小的圖（replace，一千個物件）多 3 倍的時間（2026-10-25，Apple M4）。反過來，工作一開始就要 worker 時一定要叫醒（不然呼叫的 thread 一直等），這由 `platform` 的單元測試守住（worker 都睡下之後才開工，等不到就失敗）。要數：每次 GC 發布了幾段、worker 被叫醒的次數；或在 kun 的 `bench.py gc` 檢查 gc-parallel 的 marking 不比 gc 慢。
+- **新的 GC 的平行 scavenge 怎麼省**（`heap/young.rs`）：slot set 的頁湊滿一段才給 worker（不然 nursery 小時每次都叫醒一個 worker 做一點點，2026-10-26 量到 replace 慢 18%）；worker 結束時把它每一級沒用完的區段還回頁上（不還，那些格子要等下一次 full GC 的 sweep 才重新找到）；搶輸的 copy 在最上面時退回。拿掉任何一個，結果照樣對，只是慢或多用記憶體。要數：每次 scavenge 叫醒的 worker、還回的區段的格子數；或在 kun 的 `bench.py gc` 檢查 gc-parallel 的 scavenge 不比 gc 慢。（LAB 的最後一段退回由 `young.rs` 的測試守住：一個 thread 時 nursery 剛好是 copy 的大小。）
+- **新的 GC 的配置自己 sweep 之前先套用 worker 掃好的結果**（`Inner::sweep_for`）：不先套用結果一樣，只是 heap 的 thread 多掃那一級還沒掃的頁，worker 已經掃好的要等下一個安全點才用到。測試的 platform 只在測試叫它時跑 job，安全點已經套用了它掃好的，配置時不會碰到「已經掃好、還沒套用」的頁，看不出差別。要守的話數 heap 的 thread 自己掃頁時，清單上已經有幾頁那一級的結果。
+- **scavenge 只走用過的頁的 weak 和 ephemeron 的 slot set**（`heap/young.rs` 的 `update_weak`）：改成走整張表（16384 頁）結果一樣，只是每次 scavenge 多約 30 µs，存活率低的重播的 GC 時間變成 20 倍（2026-10-26 的量測抓到）。要守的話數 `update_weak` 看了幾頁的 slot set，應該不超過用過的頁數。
+- **marker 只記下要清的 weak 格子**（`heap/concurrent.rs`）：只記目標是 old、掃的時候還沒標的（cppgc 的 `RegisterWeakReferenceIfNeeded` 同樣過濾），不記指向標過的和 young 的。拿掉過濾結果一樣（收尾時照樣再看一次目標，young 的不清），只是清單變長、收尾多看一些格子。要守的話數記下的格子，有 weak 欄位的物件指向活物件時應該是 0。
+- **sweep 不碰沒有 finalizer 的死物件**：sweep 只讀頁旁邊的 bitmap，有 finalizer 的死物件才讀它。改成讀每個死物件的 header 結果一樣，只是碰到全部的垃圾。要數：sweep 讀了幾個物件（debug build 填毒值的不算）。
+
+### 等價、不用處理的 mutation
+
+弄壞之後行為完全一樣，記在這裡免得重複追查。
+
+- scavenge 切 LAB 時，頁剩下的不夠就把頁尾填成空段（`heap/young.rs` 的 `Source::cut`）：LAB 一次 32 KiB、整除一頁，nursery 的物件最大 32 KiB，所以頁尾不會短，這段走不到；留著是為了 LAB 的大小改了時，young 的頁照樣從頭走得到 `top`（verifier 檢查）。
+- marking 收尾再跑一次 `run` 時，`Worklist::reseed` 讓 joining 的 run 一開始就算 busy（`worklist.rs`）：不設時 joining 的 run 做完自己的可能提早把 `done` 設上，但拿著段的 worker 在自己的迴圈裡做完全域剩下的段，`Platform::run` 又等所有 worker 返回才返回，所以標的一樣。留著是為了和 `Worklist::new` 的不變式一致（joining 的 run 帶著 seed、一開始就算 busy）。
+- 配置時不在 `marks` 設新物件的 bit（`Page::publish`；large object 的 `marked`）：只有 debug build 設，讓下一次 GC 知道它死了要填毒值；配置看的是 sweep 找出的空區段，marking 從清空的 bitmap 開始，沒有 bit 只是 debug 少填一些毒值。
+- concurrent marking 不處理刪掉的 root（`Heap::begin_marking` 的 `watch_removals`、`drain_removed_roots`）：marking 開始時每個 root 都當場標上，之後加的 root 拿到的不是開始時的快照裡的（到得了它的路斷掉時由寫邊的 barrier 標上），就是 marking 期間配置的（黑的），刪掉它不會漏標；TLA+ 的模型拿掉它也成立。留著是因為 root 表大了之後要改成 concurrent 地掃 root（開始時不再全部標完），那時刪 root 的 barrier 是必要的。
