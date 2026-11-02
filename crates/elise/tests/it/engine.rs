@@ -8,7 +8,9 @@
 
 use std::sync::Arc;
 
-use elise::raw::{AllocError, ArrayLayout, CAGE_BYTES, EngineHeap, Layout, TypeRange};
+use elise::raw::{
+    AllocError, ArrayLayout, BarrierState, CAGE_BYTES, EngineHeap, Layout, PAGE_SHIFT, TypeRange,
+};
 use elise::{HeapOptions, InlinePlatform};
 
 /// Two edges, then a `u64`.
@@ -86,6 +88,45 @@ fn value(heap: &EngineHeap, object: u32) -> u64 {
 fn edge(heap: &EngineHeap, object: u32, at: u32) -> u32 {
     // SAFETY: a live pair's edge.
     unsafe { heap.read_bits(object, at) }
+}
+
+/// The barrier state's marking flag, as generated code reads it.
+fn marking(heap: &EngineHeap) -> bool {
+    let state = heap.barrier_state().as_ptr().cast::<u8>();
+    // SAFETY: the state's flag, a byte, while the heap lives.
+    unsafe { state.add(BarrierState::MARKING).read() != 0 }
+}
+
+/// The barrier state's flag of the page of `bits`, as generated code
+/// reads it.
+fn young(heap: &EngineHeap, bits: u32) -> bool {
+    let state = heap.barrier_state().as_ptr().cast::<u8>();
+    // SAFETY: the state's pointer to the pages' flags, a byte each, any
+    // `u32`'s page among them, while the heap lives.
+    unsafe {
+        let pages = state
+            .add(BarrierState::YOUNG_PAGES)
+            .cast::<*const u8>()
+            .read();
+        pages.add((bits >> PAGE_SHIFT) as usize).read() != 0
+    }
+}
+
+/// A heap that GCs at every safepoint (by turns a scavenge, and a
+/// marking's start or end), its marking running only as the test steps
+/// it, with a safepoint run: the allocation after one succeeds.
+fn stressed() -> (EngineHeap, std::sync::Arc<crate::concurrent::Stepping>) {
+    let (platform, steps) = crate::concurrent::stepping_platform();
+    let mut heap = EngineHeap::new(
+        HeapOptions {
+            stress: true,
+            ..crate::verified()
+        },
+        platform,
+    );
+    // SAFETY: no roots.
+    unsafe { heap.safepoint_with_roots(give(&mut [])) };
+    (heap, steps)
 }
 
 fn send_sync<T: Send + Sync>() {}
@@ -250,6 +291,109 @@ fn asking_whether_an_id_lives_doesnt_keep_its_object() {
         steps.step();
         safepoints += 1;
     }
+}
+
+#[test]
+fn the_barrier_state_follows_the_marking_and_the_young_pages() {
+    let (_range, [pair_ty, ..]) = types();
+    let (mut heap, steps) = stressed();
+    let state = heap.barrier_state();
+    let mut roots = [pair(&mut heap, pair_ty, 0, 0, 1)];
+    assert!(young(&heap, roots[0]));
+    let (mut started, mut ended) = (false, false);
+    for _ in 0..12 {
+        // SAFETY: the root is a live pair's bits, given twice alike.
+        unsafe { heap.safepoint_with_roots(give(&mut roots)) };
+        steps.step();
+        started |= marking(&heap);
+        ended |= started && !marking(&heap);
+    }
+    assert!(started && ended, "a marking started and ended");
+    assert!(!young(&heap, roots[0]), "promoted");
+    assert_eq!(value(&heap, roots[0]), 1);
+    let heap = std::thread::spawn(move || heap).join().unwrap();
+    assert_eq!(heap.barrier_state(), state, "it stays where it is");
+}
+
+#[test]
+fn remember_keeps_a_young_object_an_old_edge_was_written_without_the_barrier() {
+    let (_range, [pair_ty, ..]) = types();
+    let mut heap = heap(crate::verified());
+    let mut roots = [pair(&mut heap, pair_ty, 0, 0, 1)];
+    // SAFETY: the root is a live pair's bits, twice: now it's old.
+    unsafe {
+        heap.scavenge_with_roots(give(&mut roots));
+        heap.scavenge_with_roots(give(&mut roots));
+    }
+    let child = pair(&mut heap, pair_ty, 0, 0, 2);
+    assert!(!young(&heap, roots[0]) && young(&heap, child));
+    // As generated code does: the write, then the barrier's slow path.
+    // SAFETY: the old pair's first edge; then its offset, holding a live
+    // young object's bits.
+    unsafe {
+        heap.cage()
+            .add(roots[0] as usize)
+            .cast::<u32>()
+            .write(child);
+        heap.remember(roots[0], child);
+    }
+    // SAFETY: as above.
+    unsafe { heap.scavenge_with_roots(give(&mut roots)) };
+    let moved = edge(&heap, roots[0], 0);
+    assert_ne!(moved, child, "the scavenge moved it, and updated the edge");
+    assert_eq!(value(&heap, moved), 2);
+}
+
+#[test]
+fn satb_keeps_what_an_edge_overwritten_while_marking_held() {
+    let (_range, [pair_ty, edges_ty, ..]) = types();
+    let (mut heap, steps) = stressed();
+    let child = pair(&mut heap, pair_ty, 0, 0, 7);
+    let mut roots = [child, 0];
+    // SAFETY: the root is a live pair's bits (or 0), given twice alike.
+    unsafe { heap.safepoint_with_roots(give(&mut roots)) };
+    roots[0] = pair(&mut heap, pair_ty, roots[0], 0, 1);
+    // The parent and its child old, no marking running, then one starting.
+    let mut safepoints = 0;
+    let settled = |heap: &EngineHeap, roots: &[u32; 2]| {
+        !young(heap, roots[0]) && !young(heap, edge(heap, roots[0], 0)) && !marking(heap)
+    };
+    while !settled(&heap, &roots) {
+        assert!(safepoints < 12, "promoted");
+        // SAFETY: as above.
+        unsafe { heap.safepoint_with_roots(give(&mut roots)) };
+        steps.step();
+        safepoints += 1;
+    }
+    while !marking(&heap) {
+        assert!(safepoints < 24, "a marking started");
+        // SAFETY: as above.
+        unsafe { heap.safepoint_with_roots(give(&mut roots)) };
+        safepoints += 1;
+    }
+    // A large array, old and black: the marker never scans it. It takes the
+    // child; the parent's edge, not scanned yet, is overwritten without the
+    // barrier: the child is kept by SATB only.
+    roots[1] = heap.alloc_array(edges_ty, 1 << 16).expect("no GC due");
+    let child = edge(&heap, roots[0], 0);
+    // SAFETY: the array's first element, the child live; the parent's first
+    // edge, its old value the child's; an `I31`'s, no object.
+    unsafe {
+        heap.write_bits(roots[1], 8, child);
+        heap.cage().add(roots[0] as usize).cast::<u32>().write(0);
+        heap.satb(child);
+        heap.satb(3);
+    }
+    while marking(&heap) {
+        assert!(safepoints < 48, "the marking ended");
+        // SAFETY: as above.
+        unsafe { heap.safepoint_with_roots(give(&mut roots)) };
+        steps.step();
+        safepoints += 1;
+    }
+    // SAFETY: the array's first element.
+    let kept = unsafe { heap.read_bits(roots[1], 8) };
+    assert_eq!(value(&heap, kept), 7);
 }
 
 #[test]

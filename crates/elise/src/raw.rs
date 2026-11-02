@@ -42,7 +42,7 @@ use crate::{Erased, Gc, Heap, Mutation};
 
 mod engine;
 
-pub use engine::{CAGE_BYTES, EngineHeap};
+pub use engine::{BarrierState, CAGE_BYTES, EngineHeap, PAGE_SHIFT};
 
 /// How many indices the table has: every type's is below it, a static
 /// type's below `MAX_TYPES`, a runtime type's above.

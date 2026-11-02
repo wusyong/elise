@@ -337,6 +337,10 @@ pub(crate) struct Inner {
     marking: RefCell<Option<concurrent::Marking>>,
     /// Whether one runs: what the barrier looks at.
     marking_active: Cell<bool>,
+    /// What an engine's generated code reads for its barriers: a copy of
+    /// `marking_active`, set with it, and `young_pages`' address, where
+    /// the heap moving doesn't move them.
+    pub(crate) barrier_state: Box<crate::raw::BarrierState>,
     /// A marking the engine drives runs: what enters the old generation
     /// meanwhile (black, never scanned) is counted in `black_bytes`, the
     /// live bytes' share the marker doesn't scan.
@@ -496,6 +500,11 @@ impl Heap {
         let mark_table = std::sync::Arc::new(MarkTable::new());
         let sweeper =
             std::sync::Arc::new(sweep::Sweeper::new(mark_table.clone(), Base(cage.base())));
+        let young_pages: std::sync::Arc<[std::sync::atomic::AtomicBool; PAGES]> =
+            std::sync::Arc::new(std::array::from_fn(|_| {
+                std::sync::atomic::AtomicBool::new(false)
+            }));
+        let barrier_state = Box::new(crate::raw::BarrierState::new(&young_pages));
         Self {
             inner: Inner {
                 shared: std::mem::ManuallyDrop::new(OwnedShared::new()),
@@ -507,9 +516,7 @@ impl Heap {
                     ..Space::default()
                 }),
                 cursors: vec![Cell::default(); page::CLASSES.len()],
-                young_pages: std::sync::Arc::new(std::array::from_fn(|_| {
-                    std::sync::atomic::AtomicBool::new(false)
-                })),
+                young_pages,
                 remembered: (0..PAGES).map(|_| SlotSet::default()).collect(),
                 remembered_weak: (0..PAGES).map(|_| SlotSet::default()).collect(),
                 remembered_ephemeron: (0..PAGES).map(|_| SlotSet::default()).collect(),
@@ -532,6 +539,7 @@ impl Heap {
                 discard_job: RefCell::new(None),
                 marking: RefCell::new(None),
                 marking_active: Cell::new(false),
+                barrier_state,
                 counts_live: Cell::new(false),
                 black_bytes: Cell::new(0),
                 concurrent: platform.posts_jobs(),
@@ -1731,6 +1739,7 @@ impl Inner {
         let floating = self.verifies().then(|| self.reachable());
         self.blacken_cursors(true);
         self.marking_active.set(true);
+        self.barrier_state.set_marking(true);
         self.counts_live.set(js.is_some());
         self.black_bytes.set(0);
         self.shared.roots.watch_removals(true);
@@ -1779,6 +1788,7 @@ impl Inner {
         platform.trace_end();
         self.blacken_cursors(false);
         self.marking_active.set(false);
+        self.barrier_state.set_marking(false);
         // A marking the engine drives: the heap uses its live bytes from
         // now on (what the sweep will find), which the engine sets its next
         // limit from, as V8 does cppgc's (`NotifyMarkingCompleted`); not

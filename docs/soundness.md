@@ -79,6 +79,13 @@ GC 的每一步都在安全點開始和收尾（scavenge、full GC 和 marking �
 
 `raw::EngineHeap` 是 `Send` 和 `Sync`，裡面的 `Heap` 不是：`Heap` 不是 `Send` 是因為操作留在 thread 上的東西（`Persistent` 用位址拿著 root 表，heap 換了 thread 之後在原本的 thread 上 drop 它，會和 GC 同時改表；`LocalExternal` 的 finalizer 在 heap 的 thread 上 drop 不是 `Send` 的值）。`EngineHeap` 不跑操作、不借出 `Heap`，所以它擁有的東西只有經過它才拿得到，跟著它一起換 thread；platform 的 worker 拿到的工作本來就是 `Send`。`Sync`：`&self` 的方法只讀 cage 的開頭、frame 的計數、用量的計數（`Cell` 的 `get`，`Cell` 只在拿著 `&mut self` 的呼叫裡、由 heap 自己的 thread 寫）和物件的 header、長度、邊（邊用 atomic 讀，和 worker 一樣），不借任何 `RefCell`；其他的方法都要 `&mut self`。給 `EngineHeap` 加 `&self` 的方法時，要確認它不寫 `Cell`、不借 `RefCell`。
 
+`EngineHeap::barrier_state` 給 engine 的碼一個指標，碼不經過 Rust 讀它指到的 barrier state 和 young 頁的旗標，所以讀的時候不能有別的 thread 在寫：
+
+- barrier state 是 `Inner` 擁有的 `Box`，位址在 heap 活著時不變，`EngineHeap` 換 thread 也不變；young 頁的旗標是 `Inner` 拿著的 `Arc` 的陣列，barrier state 的指標指著它，和它活得一樣久。`barrier_state()` 只取位址、不讀內容，所以是 `&self` 的。
+- marking 的旗標（`Cell<bool>`）只在 `marking_active` 改的地方跟著改，都在 heap 自己的 thread 上、拿著 `&mut self` 的呼叫裡；碼在拿著 `&mut self`（wasmtime 的 `Store`）的 thread 上跑，所以讀和寫在同一個 thread、不同時。
+- young 頁的旗標只在 scavenge 和 nursery 拿頁、還頁時寫：都在 heap 的 thread 上的 GC 或配置的呼叫裡，平行 scavenge 的 worker 寫的在呼叫返回前 join。碼讀的時候沒有那些呼叫在跑；concurrent marking 的 worker 同時讀，讀和讀不衝突。新增在 heap 的呼叫之外（例如 worker 在 concurrent marking 期間）寫旗標的路，碼的讀就成了 data race，要改成 atomic 的讀或換別的做法。
+- `satb`、`remember` 的前提就是 `write_bits_in` 的：值是 0、`I31` 的或活物件的 bits，格子是活物件的邊。碼要照協定做：漏掉一次 `satb` 或 `remember`，就可能留下指向已經放掉的物件的邊，和不經過 barrier 寫邊一樣，這是 engine 那一側的前提，elise 驗證不了（wasmtime 的 fork 用測試和審查守著）。多呼叫不會出錯：`satb` 自己看 marking 的旗標，`remember` 自己再檢查值和格子。
+
 **I8 大小和對齊**：`TypeInfo::of` 在編譯期檢查物件最多 8 bytes 對齊、最大是 cage 的四分之一。格子 16 bytes 對齊、large object 從頁的開頭開始、nursery 的頁從頭以 8 bytes 為單位 bump，header 8 bytes，所以物件 8 bytes 對齊。nursery 只放一格放得下的物件（`MAX_SLOT_BYTES` 以下），升到 old 時一定有它的 size class；更大的一開始就是 large object。邊的 offset 小於 4 GiB，指到的頁是在用的 size class 的頁或 large object 的第一頁（I2、I3：活的物件不會在被釋放的頁上），從 offset 算第幾格的乘法對每個頁內的位移都精確（單元測試窮舉），debug build 另外檢查算出的是格子的開頭。
 
 **I9 放回作業系統的記憶體**：discard 只在頁沒有物件時做，而且要等它進 pool 之後再過一輪 full GC：一個 GC 釋放的頁上，死物件的 finalizer 和 debug 的毒值都在同一個 GC 裡跑完，那時記憶體還在。scavenge 之後 from-space 的頁也進 pool（標成下一次 full GC 的編號，最早在那之後的一次 discard），nursery 的死物件的 finalizer 在 from-space 的頁上、毒值之前跑。被拿去用的頁先 commit。platform 有 worker 時，discard 由 worker 做（`crates/elise/src/heap/discard.rs`）：sweep 把要 discard 的頁從 pool 拿出來、標成 `Discarding` 交給它，配置、large object 和 scavenge 只拿 `Free` 的頁，所以 worker 還在 discard 的頁沒有 thread 會 commit 或寫；worker discard 完放進「做完」的清單，之後的安全點（`mutate`、`collect`、`scavenge` 開始時）才把它改回 `Free`、列進 discard 過的頁。worker 經過 `Discarder` 拿到 cage 的位址（`Send`、`Sync`，只有一個不變的指標），heap drop 時先取消它的 job（`cancel` 等它的 run 都返回），cage 才放掉。
