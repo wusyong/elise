@@ -66,9 +66,10 @@ pub struct EngineHeap {
 // SAFETY: a `Heap` isn't `Send` for what operations leave on its thread:
 // roots a `Persistent` holds by address in its tables (dropped on that
 // thread as the heap runs on another), `LocalExternal`s its finalizers drop
-// on the heap's thread. An `EngineHeap` runs no operation and lends no
-// `Heap`, so whatever it owns is reached only through it, and moves with
-// it (the barrier state's pointer too, to the heap's own young pages);
+// on the heap's thread, a roots source (`Heap::set_roots_source`) its
+// embedder's. An `EngineHeap` runs no operation and lends no `Heap` (so it
+// has no roots source either), so whatever it owns is reached only through
+// it, and moves with it (the barrier state's pointer too, to the heap's own young pages);
 // its platform's workers run the jobs it gave them (`Send` already).
 unsafe impl Send for EngineHeap {}
 

@@ -407,6 +407,9 @@ pub(crate) struct Inner {
     /// through bits (`raw::alloc_bits`): that one then doesn't wait for
     /// another, as the engine retries once after its GC.
     collected_with_roots: bool,
+    /// The roots an embedder holds as bits outside the heap's tables
+    /// (`Heap::set_roots_source`): every GC that reads the roots asks it.
+    roots_source: Option<Box<dyn RootsSource>>,
     /// The heap's full GCs, which a retired runtime type waits on (`raw`):
     /// dropped last, once nothing reads the heap's objects.
     record: types::HeapRecord,
@@ -589,6 +592,7 @@ impl Heap {
                 frames: 0,
                 frame_roots: Vec::new(),
                 collected_with_roots: false,
+                roots_source: None,
                 record: types::HeapRecord::new(),
             },
         }
@@ -680,9 +684,12 @@ impl Heap {
     /// are the engine's, which alone knows what its wrappers keep. Inside
     /// an engine's frames (`enter_frames`): they hold roots, which
     /// `collect_with_roots` is given.
+    ///
+    /// With a roots source (`set_roots_source`), with its roots; none if
+    /// it can't give them now.
     pub fn collect(&mut self) {
         self.assert_no_frames();
-        self.inner.collect_now();
+        self.with_roots(|_| {}, Inner::collect_now);
     }
 
     /// A scavenge of the nursery now, at this safepoint.
@@ -691,9 +698,11 @@ impl Heap {
     ///
     /// Inside an engine's frames (`enter_frames`): they hold roots, which
     /// `scavenge_with_roots` is given.
+    ///
+    /// With a roots source (`set_roots_source`), as `collect`.
     pub fn scavenge(&mut self) {
         self.assert_no_frames();
-        self.inner.scavenge_now();
+        self.with_roots(|_| {}, Inner::scavenge_now);
     }
 
     fn assert_no_frames(&self) {
@@ -745,6 +754,18 @@ impl Heap {
         self.inner.frames != 0
     }
 
+    /// The roots an embedder holds as bits outside the heap's tables, which
+    /// every GC that reads the roots asks for (`RootsSource`): a
+    /// safepoint's, `collect`'s and `scavenge`'s, and those given an
+    /// engine's frames' roots (`safepoint_with_roots`), which add them to
+    /// the frames'. kun's wasm documents' stores' (their globals, tables,
+    /// host roots and suspended fibers'), the heap the DOM's: Blink's heap
+    /// asks V8 for the roots it holds of it (`EmbedderRootsHandler`) as it
+    /// scans the stack. `None` takes it away.
+    pub fn set_roots_source(&mut self, source: Option<Box<dyn RootsSource>>) {
+        self.inner.roots_source = source;
+    }
+
     /// What `mutate`'s safepoint does outside an engine's frames (a
     /// scavenge, a full GC, a concurrent marking's start or end, or
     /// nothing; and a sweep's step), with the frames' roots: `roots` calls
@@ -752,7 +773,9 @@ impl Heap {
     /// `I31` or an object of the heap; a GC skips the first two, keeps the
     /// objects, and writes their bits back where it moved them. wasmtime's
     /// `GcHeap::gc`, given its roots (`GcRootsIter`) each time, as they are
-    /// on its stack then: none is kept here.
+    /// on its stack then: none is kept here. A roots source's
+    /// (`set_roots_source`) are read after them; if it can't give them now,
+    /// no GC (an allocation through bits then goes on, as one just ran).
     ///
     /// # Safety
     ///
@@ -799,7 +822,10 @@ impl Heap {
         self.with_roots(roots, Inner::collect_now);
     }
 
-    /// `gc` with the bits `roots` gives, written back after.
+    /// `gc` with the bits `roots` gives, and the roots source's
+    /// (`set_roots_source`), written back after. If the source can't give
+    /// its roots now, no GC: as an allocation's retry then goes on (in the
+    /// old generation, the nursery full), as inside frames.
     fn with_roots(
         &mut self,
         mut roots: impl FnMut(&mut dyn FnMut(&mut u32)),
@@ -807,15 +833,24 @@ impl Heap {
     ) {
         let mut bits = Vec::new();
         roots(&mut |root| bits.push(*root));
+        let mut source = self.inner.roots_source.take();
+        let given = source
+            .as_mut()
+            .is_none_or(|source| source.roots(&mut |root| bits.push(*root)));
+        if !given {
+            self.inner.roots_source = source;
+            self.inner.collected_with_roots = true;
+            return;
+        }
         self.inner.frame_roots = bits;
         gc(&mut self.inner);
         self.inner.collected_with_roots = true;
         let mut bits = std::mem::take(&mut self.inner.frame_roots).into_iter();
-        roots(&mut |root| {
-            *root = bits
-                .next()
-                .expect("the roots given again are as many as first");
-        });
+        write_back(&mut bits, &mut roots);
+        if let Some(source) = &mut source {
+            write_back(&mut bits, |visit| source.roots_again(visit));
+        }
+        self.inner.roots_source = source;
         assert!(
             bits.next().is_none(),
             "the roots given again are as many as first"
@@ -1280,6 +1315,58 @@ fn object_bytes(size: usize) -> usize {
         .expect("an object fits a quarter of the cage")
 }
 
+/// The roots an embedder holds as bits outside a heap's tables
+/// (`Heap::set_roots_source`): an engine's stores' GC references in their
+/// globals, tables and suspended stacks, which the engine hands over at
+/// its own GCs (`Heap::safepoint_with_roots`) but holds between them too.
+///
+/// # Safety
+///
+/// Each root `roots` gives holds 0, an `I31`'s bits (odd), or the offset of
+/// a live object of the heap. Given its roots once, it gives the same ones
+/// in the same order the next time (a GC reads them, then writes back
+/// where it moved them): no other call to the heap comes between.
+pub unsafe trait RootsSource {
+    /// Gives `visit` each root, and true; or false, and none, if it can't
+    /// give them now (one of their holders is busy, its frames on the
+    /// stack): the heap then runs no GC that reads the roots, as inside an
+    /// engine's frames (`Heap::enter_frames`).
+    fn roots(&mut self, visit: &mut dyn FnMut(&mut u32)) -> bool;
+}
+
+impl dyn RootsSource {
+    /// `roots` again, the GC's bits to write back: it gave them just now.
+    fn roots_again(&mut self, visit: &mut dyn FnMut(&mut u32)) {
+        assert!(
+            self.roots(visit),
+            "a roots source gave its roots, and then not again"
+        );
+    }
+}
+
+/// A GC that reads the roots, which a safepoint may be due to run
+/// (`Inner::due_gc`).
+#[derive(Clone, Copy)]
+enum SafepointGc {
+    Scavenge,
+    StartMarking,
+    FinishMarking,
+    Collect,
+}
+
+/// Writes the bits a GC left back to the roots `give` gives, in order.
+///
+/// # Panics
+///
+/// If `give` gives more roots than `bits` holds.
+fn write_back(bits: &mut impl Iterator<Item = u32>, give: impl FnOnce(&mut dyn FnMut(&mut u32))) {
+    give(&mut |root| {
+        *root = bits
+            .next()
+            .expect("the roots given again are as many as first");
+    });
+}
+
 impl Inner {
     /// `HeapStats::used_bytes`.
     pub(crate) fn used_bytes(&self) -> usize {
@@ -1696,80 +1783,116 @@ impl Inner {
     fn safepoint_work(&mut self) {
         self.take_discarded();
         self.sweep_at_safepoint();
+        self.drain_for_safepoint();
+        let Some(gc) = self.due_gc() else {
+            return;
+        };
         if self.frames != 0 {
             // An engine's frames hold roots this can't see: what reads the
             // roots waits for them (`Heap::safepoint_with_roots`), or for
-            // the frames to be left. The barrier's objects go to the
-            // workers meanwhile.
-            if self.marking.get_mut().is_some() {
-                self.drain_barrier();
-                if let Some(marking) = self.marking.get_mut()
-                    && self.options.driven
-                {
-                    marking.notify();
-                }
-            }
+            // the frames to be left.
             return;
         }
-        self.gc_work();
+        let Some(mut source) = self.roots_source.take() else {
+            self.run_gc(gc);
+            return;
+        };
+        // The embedder's roots outside the heap: if it can't give them now
+        // (one of its holders is busy), as inside frames.
+        let mut bits = Vec::new();
+        if source.roots(&mut |root| bits.push(*root)) {
+            self.frame_roots = bits;
+            self.run_gc(gc);
+            let mut bits = std::mem::take(&mut self.frame_roots).into_iter();
+            write_back(&mut bits, |visit| source.roots_again(visit));
+            assert!(
+                bits.next().is_none(),
+                "the roots given again are as many as first"
+            );
+        }
+        self.roots_source = Some(source);
     }
 
     /// A safepoint's GC, where every root is known: a scavenge, a full GC,
     /// a marking's start or end, as the heap's state says.
     fn gc_work(&mut self) {
+        self.drain_for_safepoint();
+        if let Some(gc) = self.due_gc() {
+            self.run_gc(gc);
+        }
+    }
+
+    /// A running marking's barrier drained, its objects to the workers
+    /// (told of them where the engine drives the marking): every
+    /// safepoint's, with roots or not.
+    fn drain_for_safepoint(&mut self) {
+        if self.marking.get_mut().is_some() {
+            self.drain_barrier();
+            if let Some(marking) = self.marking.get_mut()
+                && self.options.driven
+            {
+                marking.notify();
+            }
+        }
+    }
+
+    /// The GC that reads the roots a safepoint is due to run, as the heap's
+    /// state says (after `drain_for_safepoint`): none, a scavenge, a full
+    /// GC, a marking's start or end. Decided before the roots are asked
+    /// for: most safepoints while a marking runs only drain its barrier.
+    fn due_gc(&mut self) -> Option<SafepointGc> {
         if self.options.driven {
-            // The engine starts and finishes markings (`Heap::start_marking`);
-            // the barrier's objects go to the workers meanwhile. Under
-            // `stress`, a scavenge every time.
-            if self.marking.get_mut().is_some() {
-                self.drain_barrier();
-                if let Some(marking) = self.marking.get_mut() {
-                    marking.notify();
-                }
-            }
-            if self.options.stress || self.young.get_mut().full {
-                self.scavenge_alone();
-            }
-            return;
+            // The engine starts and finishes markings (`Heap::start_marking`).
+            // Under `stress`, a scavenge every time.
+            return (self.options.stress || self.young.get_mut().full)
+                .then_some(SafepointGc::Scavenge);
         }
         if self.options.stress {
             // A scavenge, then a full GC; where marking runs alongside, a
             // scavenge, a marking's start, a scavenge while it runs, its
             // end, and so on.
-            let step = self.stress_step.get();
-            self.stress_step.set(step.wrapping_add(1));
-            if step.is_multiple_of(2) {
-                if self.marking.get_mut().is_some() {
-                    self.drain_barrier();
-                }
-                self.scavenge_alone();
+            return Some(if self.stress_step.get().is_multiple_of(2) {
+                SafepointGc::Scavenge
             } else if self.marking.get_mut().is_some() {
-                self.drain_barrier();
-                self.finish_marking();
+                SafepointGc::FinishMarking
             } else if self.concurrent {
-                self.start_marking();
+                SafepointGc::StartMarking
             } else {
-                self.collect(false);
-            }
-            return;
+                SafepointGc::Collect
+            });
         }
         if self.marking.get_mut().is_some() {
-            self.drain_barrier();
             if self.at_limit(true) || self.marking_done() {
-                if !self.marking_done() {
+                Some(SafepointGc::FinishMarking)
+            } else {
+                self.young.get_mut().full.then_some(SafepointGc::Scavenge)
+            }
+        } else if self.at_limit(false) {
+            Some(SafepointGc::Collect)
+        } else if self.starts_marking() {
+            Some(SafepointGc::StartMarking)
+        } else {
+            self.young.get_mut().full.then_some(SafepointGc::Scavenge)
+        }
+    }
+
+    /// Runs `gc` (`due_gc`'s), every root known.
+    fn run_gc(&mut self, gc: SafepointGc) {
+        // A driven heap's stress reads no step (`due_gc`).
+        if self.options.stress {
+            self.stress_step.set(self.stress_step.get().wrapping_add(1));
+        }
+        match gc {
+            SafepointGc::Scavenge => self.scavenge_alone(),
+            SafepointGc::StartMarking => self.start_marking(),
+            SafepointGc::FinishMarking => {
+                if !self.options.stress && !self.marking_done() {
                     self.markings_at_limit
                         .set(self.markings_at_limit.get().saturating_add(1));
                 }
                 self.finish_marking();
-            } else if self.young.get_mut().full {
-                self.scavenge_alone();
             }
-        } else if self.at_limit(false) {
-            self.collect(false);
-        } else if self.starts_marking() {
-            self.start_marking();
-        } else if self.young.get_mut().full {
-            self.scavenge_alone();
+            SafepointGc::Collect => self.collect(false),
         }
     }
 

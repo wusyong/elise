@@ -7,14 +7,15 @@
 
 #![allow(unsafe_code, reason = "the embedder's side of runtime types")]
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use elise::raw::{self, ArrayLayout, I31, Layout, Ref, RegisterError, TypeRange};
-use elise::{Erased, Gc, GcObject, Heap, HeapOptions, Member, Mutation, Persistent};
+use elise::{Erased, Gc, GcObject, Heap, HeapOptions, Member, Mutation, Persistent, RootsSource};
 
-use crate::concurrent::{finish, start_marking, stepping_heap};
+use crate::concurrent::{finish, start_marking, stepping_heap, stepping_heap_with};
 
 /// Two edges, then a `u64`.
 const PAIR: Layout<'static> = Layout {
@@ -1237,4 +1238,230 @@ fn the_roots_given_again_are_as_many() {
             "{first} then {again}"
         );
     }
+}
+
+/// An embedder's roots outside the heap's tables (`Heap::set_roots_source`):
+/// slots of bits, whether their holder is busy, and how often the heap asked.
+#[derive(Default)]
+struct Held {
+    slots: RefCell<Vec<u32>>,
+    busy: Cell<bool>,
+    asked: Cell<usize>,
+}
+
+struct Source(Rc<Held>);
+
+// SAFETY: the tests' slots hold none, `I31`s and objects of the heap, kept
+// live by the GCs that read them; each call gives them all, in order.
+unsafe impl RootsSource for Source {
+    fn roots(&mut self, visit: &mut dyn FnMut(&mut u32)) -> bool {
+        self.0.asked.set(self.0.asked.get() + 1);
+        if self.0.busy.get() {
+            return false;
+        }
+        for slot in self.0.slots.borrow_mut().iter_mut() {
+            visit(slot);
+        }
+        true
+    }
+}
+
+fn held(heap: &mut Heap, slots: Vec<u32>) -> Rc<Held> {
+    let held = Rc::new(Held {
+        slots: RefCell::new(slots),
+        ..Held::default()
+    });
+    heap.set_roots_source(Some(Box::new(Source(held.clone()))));
+    held
+}
+
+/// `a` → `b`, the bits of `a` and an `I31`, garbage beside them.
+fn pairs_bits(heap: &mut Heap, ty: u32) -> (u32, u32) {
+    heap.mutate(|cx| {
+        let b = pair(cx, ty, None, None, 2);
+        let a = pair(cx, ty, Some(b), None, 1);
+        pair(cx, ty, Some(a), None, 3);
+        let i31 = raw::bits(cx, Some(I31::wrapping_u32(7).into()));
+        (raw::bits(cx, Some(Ref::from(a))), i31)
+    })
+}
+
+/// `a`'s value and its edge's object's, `a` the bits `held`'s first slot
+/// holds now (read after the safepoint, in the operation).
+fn held_values(heap: &mut Heap, held: &Held) -> (u64, u64) {
+    heap.read(|cx| {
+        let a = object_of(cx, held.slots.borrow()[0]);
+        (value(a), value(left(cx, a).expect("a's edge")))
+    })
+}
+
+/// A roots source's roots are read by every GC a safepoint runs: through
+/// scavenges and a concurrent marking's start and end (under `stress`,
+/// one at each safepoint), what they hold lives, moved, their bits written
+/// back; none and an `I31` stay as they are.
+#[test]
+fn a_roots_sources_roots_live_through_a_safepoints_gcs() {
+    let (_range, ty) = types(&[PAIR]);
+    let (mut heap, _steps) = stepping_heap_with(HeapOptions {
+        stress: true,
+        ..crate::verified()
+    });
+    let (a, i31) = pairs_bits(&mut heap, ty[0]);
+    let held = held(&mut heap, vec![a, 0, i31]);
+    for _ in 0..6 {
+        heap.mutate(|cx| {
+            pair(cx, ty[0], None, None, 0);
+        });
+    }
+    let stats = heap.stats();
+    assert!(stats.scavenges >= 3, "{}", stats.scavenges);
+    assert!(stats.last_gc.concurrent, "a marking ended");
+    assert_eq!(stats.markings_at_limit, 0, "stress's, ended undone");
+    assert_eq!(held.asked.get(), 12, "read, then written back, each GC");
+    let slots = held.slots.borrow().clone();
+    assert_ne!(slots[0], a, "moved");
+    assert_eq!(slots[1..], [0, i31]);
+    assert_eq!(held_values(&mut heap, &held), (1, 2));
+    // `a` → `b` and the garbage pair beside, which died.
+    assert_eq!(stats.last_gc.marked_objects, 2);
+}
+
+/// `collect` and `scavenge` read a roots source's roots too; without it
+/// (`None`), what it held dies.
+#[test]
+fn a_full_gc_and_a_scavenge_read_a_roots_sources_roots() {
+    let (_range, ty) = types(&[PAIR]);
+    let mut heap = Heap::new(crate::verified());
+    let (a, _) = pairs_bits(&mut heap, ty[0]);
+    let held = held(&mut heap, vec![a]);
+    heap.scavenge();
+    assert_eq!(heap.stats().last_scavenge.survived_objects, 2);
+    assert_ne!(held.slots.borrow()[0], a, "moved");
+    heap.collect();
+    assert_eq!(heap.stats().last_gc.marked_objects, 2);
+    assert_eq!(held_values(&mut heap, &held), (1, 2));
+    assert_eq!(held.asked.get(), 4);
+    heap.set_roots_source(None);
+    heap.collect();
+    assert_eq!(heap.stats().last_gc.marked_objects, 0);
+    assert_eq!(held.asked.get(), 4, "not asked");
+}
+
+/// While a roots source can't give its roots (its holder busy), no
+/// safepoint runs a GC that reads them: the nursery full, objects go to
+/// the old generation, past its limit; `collect` and `scavenge` run none.
+/// Once it can, the next safepoint does, its roots kept.
+#[test]
+fn a_busy_roots_source_defers_the_gcs() {
+    let (_range, ty) = types(&[PAIR, WORDS]);
+    let mut heap = Heap::new(HeapOptions {
+        nursery_bytes: 256 << 10,
+        min_allocation_bytes: 64 << 10,
+        ..crate::verified()
+    });
+    let (a, _) = pairs_bits(&mut heap, ty[0]);
+    let held = held(&mut heap, vec![a]);
+    held.busy.set(true);
+    // 1 MiB, in 256 objects.
+    for _ in 0..16 {
+        heap.mutate(|cx| {
+            for _ in 0..16 {
+                raw::alloc_array(cx, ty[1], FILLER_WORDS).unwrap();
+            }
+        });
+    }
+    heap.collect();
+    heap.scavenge();
+    let stats = heap.stats();
+    assert_eq!((stats.scavenges, stats.gcs), (0, 0));
+    assert!(!heap.is_marking());
+    assert!(stats.used_bytes > 128 << 10, "{}", stats.used_bytes);
+    assert!(heap.should_collect());
+    assert!(held.asked.get() > 2, "asked at each safepoint a GC was due");
+    assert_eq!(held.slots.borrow()[0], a);
+    held.busy.set(false);
+    heap.mutate(|_| {});
+    let stats = heap.stats();
+    assert!(stats.scavenges + stats.gcs > 0 || heap.is_marking());
+    assert_eq!(held_values(&mut heap, &held), (1, 2));
+}
+
+/// A GC given an engine's frames' roots reads a roots source's after
+/// them, and writes both back.
+#[test]
+fn a_gc_given_roots_reads_a_roots_sources_too() {
+    let (_range, ty) = types(&[PAIR]);
+    let mut heap = Heap::new(crate::verified());
+    heap.enter_frames();
+    let mut slots = [pair_bits(&mut heap, ty[0], 0, 0, 4)];
+    let (a, _) = pairs_bits(&mut heap, ty[0]);
+    let held = held(&mut heap, vec![a]);
+    let framed = slots[0];
+    // SAFETY: the slot holds an object of the heap.
+    unsafe { heap.scavenge_with_roots(give(&mut slots)) };
+    assert_eq!(heap.stats().last_scavenge.survived_objects, 3);
+    assert_ne!(slots[0], framed);
+    assert_ne!(held.slots.borrow()[0], a);
+    // SAFETY: as above.
+    unsafe { heap.collect_with_roots(give(&mut slots)) };
+    assert_eq!(heap.stats().last_gc.marked_objects, 3);
+    assert_eq!(value_of(&mut heap, slots[0]), 4);
+    assert_eq!(held_values(&mut heap, &held), (1, 2));
+}
+
+/// With a busy roots source, a GC given the frames' roots runs none: the
+/// allocation through bits that found it due goes on (as after one).
+#[test]
+fn a_busy_roots_source_lets_an_allocation_through_bits_go_on() {
+    let (_range, ty) = types(&[PAIR]);
+    let mut heap = Heap::new(HeapOptions {
+        stress: true,
+        ..crate::verified()
+    });
+    let held = held(&mut heap, Vec::new());
+    held.busy.set(true);
+    heap.enter_frames();
+    assert_eq!(
+        raw::alloc_bits(&mut heap, ty[0]),
+        Err(raw::AllocError::GcDue)
+    );
+    // SAFETY: no roots.
+    unsafe { heap.safepoint_with_roots(give(&mut [])) };
+    assert_eq!((heap.stats().scavenges, heap.stats().gcs), (0, 0));
+    raw::alloc_bits(&mut heap, ty[0]).unwrap();
+}
+
+#[test]
+#[should_panic = "a roots source gave its roots, and then not again"]
+fn a_roots_source_gives_its_roots_again() {
+    struct Once(bool);
+    // SAFETY: no roots.
+    unsafe impl RootsSource for Once {
+        fn roots(&mut self, _: &mut dyn FnMut(&mut u32)) -> bool {
+            !std::mem::replace(&mut self.0, true)
+        }
+    }
+    let mut heap = Heap::new(crate::verified());
+    heap.set_roots_source(Some(Box::new(Once(false))));
+    heap.scavenge();
+}
+
+#[test]
+#[should_panic = "the roots given again are as many as first"]
+fn a_roots_sources_roots_given_again_are_as_many() {
+    struct Fewer(usize);
+    // SAFETY: its slots hold none.
+    unsafe impl RootsSource for Fewer {
+        fn roots(&mut self, visit: &mut dyn FnMut(&mut u32)) -> bool {
+            self.0 += 1;
+            let mut slots = [0u32; 2];
+            for slot in &mut slots[..3 - self.0] {
+                visit(slot);
+            }
+            true
+        }
+    }
+    let mut heap = Heap::new(crate::verified());
+    heap.set_roots_source(Some(Box::new(Fewer(0))));
+    heap.scavenge();
 }

@@ -70,7 +70,7 @@ pub use external::{External, LocalExternal};
 pub use gc_ptr::Gc;
 pub use heap::{
     Edge, EdgeKind, Fragmentation, GcRecord, Heap, HeapObject, HeapOptions, HeapStats, InitSlot,
-    Mutation, Walk,
+    Mutation, RootsSource, Walk,
 };
 pub use ids::Id;
 pub use js::{
