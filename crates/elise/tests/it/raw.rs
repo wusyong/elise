@@ -972,7 +972,8 @@ fn inside_frames_a_safepoint_starts_no_gc() {
     });
     heap.enter_frames();
     heap.enter_frames();
-    heap.leave_frames();
+    // SAFETY: no frames of an engine hold bits: the test's are slots.
+    unsafe { heap.leave_frames() };
     assert!(heap.in_frames());
     // 1 MiB, in 256 objects.
     for _ in 0..16 {
@@ -987,7 +988,8 @@ fn inside_frames_a_safepoint_starts_no_gc() {
     assert!(!heap.is_marking());
     assert!(stats.used_bytes > 128 << 10, "{}", stats.used_bytes);
     assert!(heap.should_collect());
-    heap.leave_frames();
+    // SAFETY: as above.
+    unsafe { heap.leave_frames() };
     assert!(!heap.in_frames());
     heap.mutate(|_| {});
     let stats = heap.stats();
@@ -1205,7 +1207,8 @@ fn a_scavenge_inside_frames_needs_their_roots() {
 #[test]
 #[should_panic = "frames entered to leave"]
 fn frames_left_were_entered() {
-    Heap::new(crate::verified()).leave_frames();
+    // SAFETY: none entered: it panics.
+    unsafe { Heap::new(crate::verified()).leave_frames() };
 }
 
 /// The roots given again are those given first: more panics, as fewer.
@@ -1271,7 +1274,8 @@ fn held(heap: &mut Heap, slots: Vec<u32>) -> Rc<Held> {
         slots: RefCell::new(slots),
         ..Held::default()
     });
-    heap.set_roots_source(Some(Box::new(Source(held.clone()))));
+    // SAFETY: none replaced.
+    unsafe { heap.set_roots_source(Some(Box::new(Source(held.clone())))) };
     held
 }
 
@@ -1341,7 +1345,8 @@ fn a_full_gc_and_a_scavenge_read_a_roots_sources_roots() {
     assert_eq!(heap.stats().last_gc.marked_objects, 2);
     assert_eq!(held_values(&mut heap, &held), (1, 2));
     assert_eq!(held.asked.get(), 4);
-    heap.set_roots_source(None);
+    // SAFETY: the test lets its roots go.
+    unsafe { heap.set_roots_source(None) };
     heap.collect();
     assert_eq!(heap.stats().last_gc.marked_objects, 0);
     assert_eq!(held.asked.get(), 4, "not asked");
@@ -1442,7 +1447,8 @@ fn a_roots_source_gives_its_roots_again() {
         }
     }
     let mut heap = Heap::new(crate::verified());
-    heap.set_roots_source(Some(Box::new(Once(false))));
+    // SAFETY: none replaced.
+    unsafe { heap.set_roots_source(Some(Box::new(Once(false)))) };
     heap.scavenge();
 }
 
@@ -1462,6 +1468,156 @@ fn a_roots_sources_roots_given_again_are_as_many() {
         }
     }
     let mut heap = Heap::new(crate::verified());
-    heap.set_roots_source(Some(Box::new(Fewer(0))));
+    // SAFETY: none replaced.
+    unsafe { heap.set_roots_source(Some(Box::new(Fewer(0)))) };
     heap.scavenge();
+}
+
+/// The barrier state's marking flag, as generated code reads it.
+fn marking_flag(heap: &Heap) -> bool {
+    let state = raw::barrier_state_in(heap).as_ptr().cast::<u8>();
+    // SAFETY: the state's flag, a byte, while the heap lives.
+    unsafe { state.add(raw::BarrierState::MARKING).read() != 0 }
+}
+
+/// An engine's functions on a `Heap` (`EngineHeap`'s): an object's data is
+/// at its bits past the cage's start, its size read from it alone; an id
+/// lives as its object does.
+#[test]
+fn an_objects_bytes_and_id_through_bits_on_a_heap() {
+    let (_range, ty) = types(&[PAIR, EDGES]);
+    let mut heap = Heap::new(crate::verified());
+    heap.enter_frames();
+    let mut slots = [
+        pair_bits(&mut heap, ty[0], 0, 0, 5),
+        raw::alloc_array_bits(&mut heap, ty[1], 4).unwrap(),
+    ];
+    let cage = raw::cage_in(&heap);
+    heap.mutate(|cx| {
+        let data = raw::data(object_of(cx, slots[0])).as_ptr();
+        assert_eq!(data, cage.wrapping_add(slots[0] as usize));
+    });
+    // SAFETY: the cage's start; live objects' bits.
+    unsafe {
+        assert_eq!(raw::size_at(cage, slots[0]), 16);
+        assert_eq!(raw::size_at(cage, slots[1]), 8 + 4 * 4);
+    }
+    // SAFETY: a live object's bits.
+    let id = unsafe { raw::new_id_in(&mut heap, slots[0]) };
+    // SAFETY: the slots hold objects of the heap.
+    unsafe { heap.collect_with_roots(give(&mut slots)) };
+    assert!(raw::id_lives_in(&mut heap, id), "rooted, promoted");
+    assert_eq!(raw::cage_in(&heap), cage, "it stays where it is");
+    // SAFETY: as above.
+    unsafe { assert_eq!(raw::size_at(cage, slots[0]), 16) };
+    // SAFETY: none.
+    unsafe { heap.collect_with_roots(give(&mut [])) };
+    assert!(!raw::id_lives_in(&mut heap, id), "dead");
+}
+
+/// The generational barrier's slow path on a `Heap`, as generated code
+/// calls it: an old object's edge written plainly to a young one is kept
+/// by `remember_in`.
+#[test]
+fn remember_in_keeps_a_young_object_an_old_edge_was_written_without_the_barrier() {
+    let (_range, ty) = types(&[PAIR]);
+    let mut heap = Heap::new(crate::verified());
+    heap.enter_frames();
+    let mut slots = [pair_bits(&mut heap, ty[0], 0, 0, 1)];
+    // SAFETY: the slots hold objects of the heap.
+    unsafe { heap.collect_with_roots(give(&mut slots)) };
+    let young = pair_bits(&mut heap, ty[0], 0, 0, 2);
+    // As generated code does: the write, then the barrier's slow path.
+    // SAFETY: the old pair's second edge; then its offset, holding a live
+    // young object's bits.
+    unsafe {
+        raw::cage_in(&heap)
+            .add(slots[0] as usize + 4)
+            .cast::<u32>()
+            .write(young);
+        raw::remember_in(&mut heap, slots[0] + 4, young);
+    }
+    // SAFETY: as above.
+    unsafe { heap.scavenge_with_roots(give(&mut slots)) };
+    let moved = edge_of(&heap, slots[0], 4);
+    assert_ne!(moved, young, "moved, the edge updated");
+    assert_eq!(value_of(&mut heap, moved), 2);
+}
+
+/// The marking barrier's slow path on a `Heap`, as generated code calls
+/// it: an edge overwritten while a marking runs, its old value given to
+/// `satb_in`, keeps what it held; the barrier state's flag says a marking
+/// runs.
+#[test]
+fn satb_in_keeps_what_an_edge_overwritten_while_marking_held() {
+    let (_range, ty) = types(&[PAIR]);
+    let (mut heap, steps) = stepping_heap(0);
+    heap.enter_frames();
+    let child = pair_bits(&mut heap, ty[0], 0, 0, 7);
+    let mut slots = vec![pair_bits(&mut heap, ty[0], child, 0, 1)];
+    assert!(!marking_flag(&heap));
+    // With no marking running, nothing (the objects are old: the heap has
+    // no nursery).
+    // SAFETY: a live object's bits.
+    unsafe { raw::satb_in(&mut heap, child) };
+    // A marking, started given the parent: the frames take its child, and
+    // cut its edge plainly, the old value to `satb_in`.
+    for _ in 0..1000 {
+        if heap.should_collect() {
+            break;
+        }
+        heap.mutate(|cx| {
+            for _ in 0..100 {
+                pair(cx, ty[0], None, None, 0);
+            }
+        });
+    }
+    // SAFETY: as above.
+    unsafe { heap.safepoint_with_roots(give(&mut slots)) };
+    assert!(heap.is_marking() && marking_flag(&heap));
+    let child = edge_of(&heap, slots[0], 0);
+    slots.push(child);
+    // SAFETY: the parent's first edge, its old value the child's; an
+    // `I31`'s, no object.
+    unsafe {
+        raw::cage_in(&heap)
+            .add(slots[0] as usize)
+            .cast::<u32>()
+            .write(0);
+        raw::satb_in(&mut heap, child);
+        raw::satb_in(&mut heap, 3);
+    }
+    heap.mutate(|_| {});
+    steps.step();
+    // SAFETY: as above.
+    unsafe { heap.safepoint_with_roots(give(&mut slots)) };
+    assert!(!heap.is_marking() && !marking_flag(&heap));
+    assert_eq!(
+        heap.stats().last_gc.marked_objects,
+        2,
+        "the parent, and the child"
+    );
+    assert_eq!(value_of(&mut heap, slots[1]), 7);
+}
+
+/// A heap's `HeapAlive` is its alone, and cleared as it goes; dropped inside an engine's
+/// frames, it leaks: its objects stay where the engine's code reads them.
+#[test]
+fn a_heap_dropped_inside_frames_leaks() {
+    let (_range, ty) = types(&[PAIR]);
+    let heap = Heap::new(crate::verified());
+    let alive = raw::alive_in(&heap);
+    assert!(alive.get() && alive.is(&heap));
+    assert!(!alive.is(&Heap::new(crate::verified())), "another");
+    drop(heap);
+    assert!(!alive.get(), "gone");
+    let mut heap = Heap::new(crate::verified());
+    heap.enter_frames();
+    let object = pair_bits(&mut heap, ty[0], 0, 0, 9);
+    let (cage, alive) = (raw::cage_in(&heap), raw::alive_in(&heap));
+    drop(heap);
+    assert!(!alive.get(), "gone, leaked");
+    // SAFETY: the leaked heap's pair's `u64`, its cage kept.
+    let value = unsafe { cage.add(object as usize + 8).cast::<u64>().read() };
+    assert_eq!(value, 9);
 }

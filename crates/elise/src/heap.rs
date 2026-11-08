@@ -232,7 +232,8 @@ fn elapsed_ns(start: Instant) -> u64 {
 }
 
 pub struct Heap {
-    inner: Inner,
+    /// Dropped by `Heap`'s drop, unless it leaks (dropped inside frames).
+    inner: std::mem::ManuallyDrop<Inner>,
 }
 
 /// The root tables a `Persistent` and a `WeakPersistent` hold by address
@@ -410,6 +411,8 @@ pub(crate) struct Inner {
     /// The roots an embedder holds as bits outside the heap's tables
     /// (`Heap::set_roots_source`): every GC that reads the roots asks it.
     roots_source: Option<Box<dyn RootsSource>>,
+    /// Cleared as the heap goes (`raw::HeapAlive`).
+    pub(crate) alive: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// The heap's full GCs, which a retired runtime type waits on (`raw`):
     /// dropped last, once nothing reads the heap's objects.
     record: types::HeapRecord,
@@ -525,7 +528,7 @@ impl Heap {
             }));
         let barrier_state = Box::new(crate::raw::BarrierState::new(&young_pages));
         Self {
-            inner: Inner {
+            inner: std::mem::ManuallyDrop::new(Inner {
                 shared: std::mem::ManuallyDrop::new(OwnedShared::new()),
                 cage,
                 space: RefCell::new(Space {
@@ -593,8 +596,9 @@ impl Heap {
                 frame_roots: Vec::new(),
                 collected_with_roots: false,
                 roots_source: None,
+                alive: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
                 record: types::HeapRecord::new(),
-            },
+            }),
         }
     }
 
@@ -723,7 +727,9 @@ impl Heap {
     /// due (`raw::alloc_bits`), as V8 GCs where wasm's `struct.new` does,
     /// its frames' roots from their safepoint tables. cppgc is told the
     /// same of a stack (`EmbedderStackState::kMayContainHeapPointers`), and
-    /// scans it conservatively; the heap scans nothing.
+    /// scans it conservatively; the heap scans nothing. A heap dropped
+    /// inside frames leaks (its cage and pages, its objects unfinalized):
+    /// the engine's code may still read and write it.
     ///
     /// # Panics
     ///
@@ -738,10 +744,16 @@ impl Heap {
 
     /// The frames entered last (`enter_frames`) are off the stack.
     ///
+    /// # Safety
+    ///
+    /// They are: no frame of the engine's that holds the heap's objects as
+    /// bits is on the stack but those entered before (a safepoint may now
+    /// move or free what such a frame holds).
+    ///
     /// # Panics
     ///
     /// If none were entered.
-    pub fn leave_frames(&mut self) {
+    pub unsafe fn leave_frames(&mut self) {
         self.inner.frames = self
             .inner
             .frames
@@ -762,8 +774,20 @@ impl Heap {
     /// host roots and suspended fibers'), the heap the DOM's: Blink's heap
     /// asks V8 for the roots it holds of it (`EmbedderRootsHandler`) as it
     /// scans the stack. `None` takes it away.
-    pub fn set_roots_source(&mut self, source: Option<Box<dyn RootsSource>>) {
+    ///
+    /// # Safety
+    ///
+    /// The source it replaces (if any) holds no roots the heap's objects
+    /// still need: no holder of them uses the heap any more (a GC without
+    /// them frees what they hold).
+    pub unsafe fn set_roots_source(&mut self, source: Option<Box<dyn RootsSource>>) {
         self.inner.roots_source = source;
+    }
+
+    /// Whether it has a roots source (`set_roots_source`): one embedder's
+    /// replacing another's would lose the roots it gives.
+    pub fn has_roots_source(&self) -> bool {
+        self.inner.roots_source.is_some()
     }
 
     /// What `mutate`'s safepoint does outside an engine's frames (a
@@ -833,12 +857,14 @@ impl Heap {
     ) {
         let mut bits = Vec::new();
         roots(&mut |root| bits.push(*root));
-        let mut source = self.inner.roots_source.take();
-        let given = source
+        // The source stays in its place: the GC doesn't ask it, and a panic
+        // leaves it there.
+        let given = self
+            .inner
+            .roots_source
             .as_mut()
             .is_none_or(|source| source.roots(&mut |root| bits.push(*root)));
         if !given {
-            self.inner.roots_source = source;
             self.inner.collected_with_roots = true;
             return;
         }
@@ -847,10 +873,9 @@ impl Heap {
         self.inner.collected_with_roots = true;
         let mut bits = std::mem::take(&mut self.inner.frame_roots).into_iter();
         write_back(&mut bits, &mut roots);
-        if let Some(source) = &mut source {
+        if let Some(source) = &mut self.inner.roots_source {
             write_back(&mut bits, |visit| source.roots_again(visit));
         }
-        self.inner.roots_source = source;
         assert!(
             bits.next().is_none(),
             "the roots given again are as many as first"
@@ -1046,6 +1071,14 @@ impl Heap {
 
 impl Drop for Heap {
     fn drop(&mut self) {
+        self.inner
+            .alive
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        if self.inner.frames != 0 {
+            // An engine's frames are on the stack, and its code reads and
+            // writes the cage: it stays, with everything the heap holds.
+            return;
+        }
         // A marking's job reads the cage, and the discards' maps it: they
         // stop first.
         if let Some(marking) = self.inner.marking.get_mut() {
@@ -1101,6 +1134,8 @@ impl Drop for Heap {
             shared.leak();
             debug_assert!(std::thread::panicking(), "{left} roots outlive their heap");
         }
+        // SAFETY: dropped once, here, as the heap goes.
+        unsafe { std::mem::ManuallyDrop::drop(&mut self.inner) };
     }
 }
 
@@ -1793,24 +1828,26 @@ impl Inner {
             // the frames to be left.
             return;
         }
-        let Some(mut source) = self.roots_source.take() else {
+        let Some(source) = &mut self.roots_source else {
             self.run_gc(gc);
             return;
         };
         // The embedder's roots outside the heap: if it can't give them now
-        // (one of its holders is busy), as inside frames.
+        // (one of its holders is busy), as inside frames. The source stays
+        // in its place (`Heap::with_roots`).
         let mut bits = Vec::new();
-        if source.roots(&mut |root| bits.push(*root)) {
-            self.frame_roots = bits;
-            self.run_gc(gc);
-            let mut bits = std::mem::take(&mut self.frame_roots).into_iter();
-            write_back(&mut bits, |visit| source.roots_again(visit));
-            assert!(
-                bits.next().is_none(),
-                "the roots given again are as many as first"
-            );
+        if !source.roots(&mut |root| bits.push(*root)) {
+            return;
         }
-        self.roots_source = Some(source);
+        self.frame_roots = bits;
+        self.run_gc(gc);
+        let mut bits = std::mem::take(&mut self.frame_roots).into_iter();
+        let source = self.roots_source.as_mut().expect("still there");
+        write_back(&mut bits, |visit| source.roots_again(visit));
+        assert!(
+            bits.next().is_none(),
+            "the roots given again are as many as first"
+        );
     }
 
     /// A safepoint's GC, where every root is known: a scavenge, a full GC,

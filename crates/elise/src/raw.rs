@@ -32,13 +32,14 @@
 
 use std::fmt;
 use std::ptr::{self, NonNull};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use crate::heap::Inner;
 use crate::member::compress;
 use crate::page::HEADER_BYTES;
 use crate::types::{self, Finalizer, MAX_OBJECT_BYTES};
-use crate::{Erased, Gc, Heap, Mutation};
+use crate::{Erased, Gc, Heap, Id, Mutation};
 
 mod engine;
 
@@ -617,6 +618,133 @@ pub unsafe fn write_bits_in(heap: &mut Heap, object: u32, at: u32, bits: u32) {
     let inner = heap.inner();
     // SAFETY: as the caller promises.
     inner.write_raw_edge(unsafe { edge_in(inner, object, at) }, bits);
+}
+
+/// Whether a heap lives (`alive_in`): an engine that keeps a heap's cage's
+/// start (`cage_in`) and reads objects there without borrowing the heap
+/// checks it first, on the heap's thread.
+#[derive(Clone)]
+pub struct HeapAlive(Arc<AtomicBool>);
+
+impl HeapAlive {
+    /// False once the heap is dropped (or leaked, dropped inside frames).
+    pub fn get(&self) -> bool {
+        self.0.load(Ordering::Relaxed)
+    }
+
+    /// Whether `heap` is the heap it tells of: another heap is never, even
+    /// at the same cage (this one dropped).
+    pub fn is(&self, heap: &Heap) -> bool {
+        Arc::ptr_eq(&self.0, &heap.inner().alive)
+    }
+}
+
+/// `heap`'s `HeapAlive`.
+pub fn alive_in(heap: &Heap) -> HeapAlive {
+    HeapAlive(heap.inner().alive.clone())
+}
+
+/// The start of `heap`'s cage: an object's data is at its bits past it.
+/// It stays where it is while the heap lives, wherever the heap moves.
+pub fn cage_in(heap: &Heap) -> *mut u8 {
+    heap.inner().cage.base()
+}
+
+/// The bytes of the object with `object` bits that its type's layout
+/// describes (an array's elements too), from `cage + object` on: read from
+/// the object alone, with no heap (an engine that keeps the cage's start,
+/// `cage_in`, reads an object's bytes without borrowing its heap).
+///
+/// # Safety
+///
+/// `cage` is a heap's cage's start (`cage_in`), and `object` the offset of
+/// a live object of that heap.
+pub unsafe fn size_at(cage: *const u8, object: u32) -> usize {
+    let data = cage.wrapping_add(object as usize);
+    // SAFETY: as the caller promises, a live object's header, whose first
+    // word is its type's index (written before it was published, and
+    // kept), and whose type isn't freed while it lives.
+    unsafe {
+        let index = data.sub(HEADER_BYTES).cast::<u32>().read();
+        types::entry(index).raw_size(data)
+    }
+}
+
+/// What generated code reads for its barriers (`BarrierState`): it stays
+/// where it is while `heap` lives, wherever the heap moves. The code
+/// writing an edge of an object with `value` (0, an `I31`'s or an object's
+/// bits), as `write_bits_in` does:
+///
+/// - reads the marking flag, and if it's set, calls `satb_in` with the
+///   edge's old value before writing;
+/// - writes;
+/// - if `value` is an object's on a young page and the edge's offset
+///   isn't on one, calls `remember_in`.
+///
+/// An edge it initializes, in an object just allocated, takes the second
+/// check only: it held 0. A root's (the engine's own memory, outside the
+/// cage) takes neither: the GCs are given the roots.
+pub fn barrier_state_in(heap: &Heap) -> NonNull<BarrierState> {
+    NonNull::from(&*heap.inner().barrier_state)
+}
+
+/// `Mutation::new_id` outside any operation: the next id of `heap`'s id
+/// table, for the object with `object` bits.
+///
+/// # Safety
+///
+/// `object` is the offset of a live object of `heap` (the table's GCs read
+/// its mark bits and its page).
+///
+/// # Panics
+///
+/// Once 2^32 - 1 ids were given.
+pub unsafe fn new_id_in(heap: &mut Heap, object: u32) -> Id {
+    let inner = heap.inner();
+    let young = inner.is_young(object as usize);
+    inner.ids.borrow_mut().insert(object, young)
+}
+
+/// Whether `id`'s object lives, as far as `heap`'s GCs found: unlike
+/// `Mutation::by_id`, it doesn't mark the object, so it tells what died,
+/// not an object to take (one a marking running hasn't reached yet still
+/// lives). `&mut Heap`: it borrows the id table.
+pub fn id_lives_in(heap: &mut Heap, id: Id) -> bool {
+    heap.inner().ids.borrow().get(id) != 0
+}
+
+/// The barrier's slow path, while a marking runs: `old`, the value of an
+/// edge about to be overwritten, is marked, if it is an old object the
+/// marking hasn't reached, and pushed for the marker (SATB). Nothing for
+/// 0, an `I31`, or with no marking running.
+///
+/// # Safety
+///
+/// `old` is 0, an `I31`'s, or the bits of a live object of `heap`: a live
+/// object's edge's value.
+pub unsafe fn satb_in(heap: &mut Heap, old: u32) {
+    let inner = heap.inner();
+    if inner.barrier_state.marking.get() && !is_i31(old) {
+        inner.satb(old);
+    }
+}
+
+/// The barrier's slow path for an old object's edge, at `slot`, given a
+/// young object's bits (`value`): the slot goes into its page's slot set,
+/// so that the next scavenge finds the young object and updates the edge.
+/// It checks again: nothing if `value` is 0, an `I31`, or old, or `slot`
+/// young.
+///
+/// # Safety
+///
+/// `slot` is the offset of an edge of a live object of `heap`, and `value`
+/// is what it was just written: 0, an `I31`'s, or the bits of a live
+/// object of `heap`.
+pub unsafe fn remember_in(heap: &mut Heap, slot: u32, value: u32) {
+    let inner = heap.inner();
+    if !is_i31(value) {
+        inner.write_barrier(inner.ptr(slot as usize), value);
+    }
 }
 
 /// The edge at `at` of `object`.
