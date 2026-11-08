@@ -240,6 +240,7 @@ GC 的每一步都在安全點開始和收尾（scavenge、full GC 和 marking �
 - `allocate` 先清零、寫長度，才 `publish`；`alloc_array` 的大小是 checked 的。
 - `write_edge`、`write_bits` 只經過 `Inner::write_raw_edge`；`edge` 檢查格子在 cage 裡。GC 新增讀執行時的型別的邊的地方，要先用 `raw::is_i31` 跳過 `I31`；scavenge 經過 `evacuate` 的值都已經跳過。
 - 不經過操作的入口（`alloc_bits`、`write_bits_in` 等）都在 `&mut Heap` 或 `&Heap` 上、從不 GC；`write_bits_in` 只經過 `Inner::write_raw_edge`，`edge_in` 檢查格子在 cage 裡。GC 新增讀 root 的地方（root 表之外），要一起讀 `Inner::frame_roots`（`root_offsets`、scavenge 的 root）；新增會在 frame 裡開始 GC 的路，要先拿到 frame 的 root。
+- embedder 在 concurrent marking 進行時寫執行時的型別的物件（wasmtime 的 runtime）：marker 在 worker 上只用 atomic 讀物件的邊和陣列的長度，不讀其他 byte、也不寫物件。所以寫邊只能經過 `write_bits`、`write_edge`（atomic、帶 barrier）或 engine 自己產生的、照同樣的 barrier 的碼；其他 byte 可以一般地寫，但 embedder 不能建涵蓋邊的 `&mut`（或 `&[u8]`）：那會和 marker 的讀衝突。陣列的長度只在配置時寫。新增 marker 會讀的 byte 時，要重新看用這個 API 的 embedder。
 - 退休等的計數：`gc_started` 在每個 full GC 的開始（`Inner::collect`、`start_marking_with` 的 `finish_sweeping` 之後），`gc_finished` 在 `sweep_done` 的最後。新增開始 full GC 的路、讓 sweep 或 heap 的 drop 讀到執行時的型別（例如給它們 drop glue）、或讓 GC 在別的時候讀死物件的 header 時，要重新看 I14 的論證。
 
 ### `crates/elise/src/heap/walk.rs`：heap snapshot 的走訪（I1、I2、I3、I14）
