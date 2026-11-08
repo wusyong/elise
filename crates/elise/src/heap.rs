@@ -770,7 +770,7 @@ impl Heap {
     /// every GC that reads the roots asks for (`RootsSource`): a
     /// safepoint's, `collect`'s and `scavenge`'s, and those given an
     /// engine's frames' roots (`safepoint_with_roots`), which add them to
-    /// the frames'. kun's wasm documents' stores' (their globals, tables,
+    /// the frames'. machopo's wasm documents' stores' (their globals, tables,
     /// host roots and suspended fibers'), the heap the DOM's: Blink's heap
     /// asks V8 for the roots it holds of it (`EmbedderRootsHandler`) as it
     /// scans the stack. `None` takes it away.

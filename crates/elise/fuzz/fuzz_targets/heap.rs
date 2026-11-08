@@ -6,7 +6,7 @@
 
 use libfuzzer_sys::fuzz_target;
 
-// The encoder is for seeds, which kun's `gc_bench` makes.
+// The encoder is for seeds, which machopo's `gc_bench` makes.
 #[path = "../../tests/it/ops.rs"]
 #[allow(dead_code)]
 mod ops;

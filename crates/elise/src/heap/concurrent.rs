@@ -17,7 +17,7 @@
 //!
 //! The marker skips edges to young objects: what young objects reach of
 //! the old generation is in the snapshot or new, so marked either way
-//! (`details.md` of kun's RFC 0087). At a safepoint after the workers found
+//! (`details.md` of machopo's RFC 0087). At a safepoint after the workers found
 //! nothing left, or once the old generation reached its limit, the heap
 //! finishes: cancels the job, publishes the mutator's list, and marks what
 //! is left with every thread (a joining run of the same job), then sweeps.

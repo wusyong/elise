@@ -6,7 +6,7 @@
 
 **目標**：不寫 `unsafe` 的程式碼只透過 `elise` 和 `elise-derive` 的 API，不可能造成 UB：use-after-free、讀到沒初始化的記憶體、型別混淆、違反 Rust 的 aliasing 規則、data race。
 
-GC 的每一步都在安全點開始和收尾（scavenge、full GC 和 marking 的收尾都交給 heap 的 platform，可以有 worker），old 的 concurrent marking、concurrent sweep（含 `External` 的 finalizer）和空頁的 discard 在兩個安全點之間、和 mutator 同時在 worker 上跑；在下面的假設 G1–G3 下成立。scavenge 會搬動 nursery 的物件，論證的重點是搬動之後沒有指標指向舊的位置（I3、I10）；concurrent marking 的重點是 marker 和 mutator 同時碰的只有 atomic 的邊和 mark bit、marker 只讀寫好的物件（I4、I7），以及收尾時到得了的都標過（I3）；sweep 只讀交給它的頁的 mark bit（I7）；由 JS engine 推進的 marking 另外有 engine 的 thread 交物件的位址過來，論證在 I11。和 kun 的 `dom` 在 cppgc 上的論證不同，整個 heap 是 Rust 寫的，所以 Miri 能執行全部的程式：測試在 Miri 底下跑（Stacked Borrows、strict provenance），Miri 檢查的是那些測試走到的路徑沒有 UB；沒走到的路徑靠下面的不變式和人工審查。
+GC 的每一步都在安全點開始和收尾（scavenge、full GC 和 marking 的收尾都交給 heap 的 platform，可以有 worker），old 的 concurrent marking、concurrent sweep（含 `External` 的 finalizer）和空頁的 discard 在兩個安全點之間、和 mutator 同時在 worker 上跑；在下面的假設 G1–G3 下成立。scavenge 會搬動 nursery 的物件，論證的重點是搬動之後沒有指標指向舊的位置（I3、I10）；concurrent marking 的重點是 marker 和 mutator 同時碰的只有 atomic 的邊和 mark bit、marker 只讀寫好的物件（I4、I7），以及收尾時到得了的都標過（I3）；sweep 只讀交給它的頁的 mark bit（I7）；由 JS engine 推進的 marking 另外有 engine 的 thread 交物件的位址過來，論證在 I11。和 machopo 的 `dom` 在 cppgc 上的論證不同，整個 heap 是 Rust 寫的，所以 Miri 能執行全部的程式：測試在 Miri 底下跑（Stacked Borrows、strict provenance），Miri 檢查的是那些測試走到的路徑沒有 UB；沒走到的路徑靠下面的不變式和人工審查。
 
 ## 假設
 

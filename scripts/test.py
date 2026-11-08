@@ -76,7 +76,7 @@ def cmd_fuzz(args: argparse.Namespace) -> int:
     operations on a heap against a model that collects nothing
     (`crates/elise/tests/it/ops.rs`). It keeps what it finds in
     target/fuzz/corpus/, run after run, and with `--seeds` starts from that
-    directory's inputs too (kun's `gc_bench fuzz-seeds` makes them of its
+    directory's inputs too (machopo's `gc_bench fuzz-seeds` makes them of its
     heap recordings). On a failure it minimizes the input and prints where
     it is: put it in crates/elise/fuzz/regressions/ with the fix, and `cargo
     test -p elise` replays it. Needs `cargo install cargo-fuzz`. Built for

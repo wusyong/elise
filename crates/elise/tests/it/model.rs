@@ -1,7 +1,7 @@
 //! A small DOM on the heap: nodes with a parent, a first child and a next
 //! sibling, attributes in a `HeapVector`, a style in an `External` and a
 //! finalizer that logs its node's id. The workspace denies `unsafe` here,
-//! as in kun's DOM: the derive's output passes it.
+//! as in machopo's DOM: the derive's output passes it.
 //!
 //! What catches a bug: an edge or a root the GC doesn't mark (a test reads
 //! a poisoned or reused slot), garbage kept or a live object finalized, a

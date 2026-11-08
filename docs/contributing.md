@@ -1,8 +1,8 @@
 # 參與開發
 
-## 和 kun 的關係
+## 和 machopo 的關係
 
-elise 從 [kun](https://gitlab.com/kunlabs/kun) 的 `gc` crate 分出來。在 kun 換過來用它之前，kun 仍然用自己的 `crates/gc`，兩邊的改動要手動同步：除了 crate 的名字（`gc` → `elise`、`gc_macros` → `elise-derive`）、指向 kun 的路徑和指令，和 `cargo fmt` 排的格式，程式碼和測試一樣。kun 換過來時直接依賴 `elise`，不改名。
+elise 從 [machopo](https://gitlab.com/kunlabs/kun) 的 `gc` crate 分出來。在 machopo 換過來用它之前，machopo 仍然用自己的 `crates/gc`，兩邊的改動要手動同步：除了 crate 的名字（`gc` → `elise`、`gc_macros` → `elise-derive`）、指向 machopo 的路徑和指令，和 `cargo fmt` 排的格式，程式碼和測試一樣。machopo 換過來時直接依賴 `elise`，不改名。
 
 ## 規則
 

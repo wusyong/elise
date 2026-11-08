@@ -143,7 +143,7 @@ The documents in `docs/` are written in Traditional Chinese:
   how to run it.
 - [contributing.md](docs/contributing.md): the repo's rules (`unsafe`,
   integer overflow, tests, line endings) and how elise stays in sync with
-  kun.
+  machopo.
 
 ## License
 
