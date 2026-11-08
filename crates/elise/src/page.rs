@@ -129,6 +129,29 @@ pub(crate) fn class_for(bytes: usize) -> Option<usize> {
     (class < CLASSES.len()).then_some(class)
 }
 
+/// `class_for`, at compile time: a type's (`TypeInfo::of`), so that its
+/// allocation doesn't search the classes (cppgc knows an object's space
+/// from its size, a constant in `MakeGarbageCollected`). `NO_CLASS` for a
+/// large object.
+#[expect(
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation,
+    reason = "evaluated at compile time, where an overflow fails the build; CLASS_COUNT fits a u8"
+)]
+pub(crate) const fn const_class_for(bytes: usize) -> u8 {
+    let mut class = 0;
+    while class < CLASS_COUNT {
+        if CLASSES[class] >= bytes {
+            return class as u8;
+        }
+        class += 1;
+    }
+    NO_CLASS
+}
+
+/// `const_class_for`'s large object.
+pub(crate) const NO_CLASS: u8 = u8::MAX;
+
 /// What marking reads of a page in use: where its slots are, and their
 /// mark bits. A large object is one slot.
 pub(crate) struct Marks {
@@ -251,6 +274,21 @@ impl Marks {
             ranges,
             live: ones(&words).count(),
         }
+    }
+
+    /// Slot `slot`'s finalizable bit set by the page's only writer: a plain
+    /// load and store, not an atomic or (`publish`'s, at every allocation
+    /// with drop glue). The heap's thread writes a page's bits while the
+    /// page is in use; a page handed to the sweep's worker is the worker's
+    /// alone until its result is applied, and no slot of it is handed out
+    /// before (soundness's I6), so no other thread writes the word between
+    /// the load and the store.
+    fn set_finalizable_alone(&self, slot: usize) {
+        let word = &self.finalizable[slot / 64];
+        word.store(
+            word.load(Ordering::Relaxed) | 1u64 << (slot % 64),
+            Ordering::Relaxed,
+        );
     }
 
     fn set_finalizable(&self, slot: usize, finalizable: bool) {
@@ -381,6 +419,28 @@ impl MarkTable {
         // only the pages handed to it, which are freed only once their
         // results are applied (or the sweep's job is cancelled).
         (!marks.is_null()).then(|| unsafe { &*marks })
+    }
+
+    /// Records the new object at `data`, whole now, in its page's bitmaps
+    /// as `Page::publish` does, through the table (allocation's fast path
+    /// doesn't borrow the space for its page): marked if `mark` (debug
+    /// builds, no marking running), finalizable if it has drop glue. The
+    /// page's counts are the caller's to add.
+    ///
+    /// # Panics
+    ///
+    /// If no page in use holds it.
+    pub(crate) fn publish(&self, data: usize, finalizable: bool, mark: bool) {
+        let marks = self
+            .get(number_of(data))
+            .expect("an object is allocated on a page in use");
+        let slot = marks.slot_of(data);
+        if mark {
+            marks.set(slot, true);
+        }
+        if finalizable {
+            marks.set_finalizable_alone(slot);
+        }
     }
 
     /// Marks the object at `data`: whether it wasn't marked.
@@ -588,7 +648,7 @@ impl Page {
             self.marks.set(slot, true);
         }
         if finalizer != Finalizer::None {
-            self.marks.set_finalizable(slot, true);
+            self.marks.set_finalizable_alone(slot);
             self.finalizable_objects = self.finalizable_objects.saturating_add(1);
         }
         if finalizer == Finalizer::Main {
@@ -942,6 +1002,21 @@ mod tests {
         assert_eq!(CLASSES[class_for(337).unwrap()], 368);
         assert_eq!(class_for(MAX_SLOT_BYTES), Some(CLASSES.len() - 1));
         assert_eq!(class_for(MAX_SLOT_BYTES + 1), None);
+    }
+
+    /// A type's class, worked out at compile time, is the one allocation
+    /// would search for (every size under Miri's every 61st).
+    #[test]
+    fn the_compile_time_class_is_the_searched_one() {
+        let step = if cfg!(miri) { 61 } else { 1 };
+        for bytes in (1..=MAX_SLOT_BYTES + 64).step_by(step) {
+            let class = const_class_for(bytes);
+            assert_eq!(
+                (class != NO_CLASS).then_some(class as usize),
+                class_for(bytes),
+                "{bytes} bytes"
+            );
+        }
     }
 
     /// The multiplication is the division for every offset in a page (every

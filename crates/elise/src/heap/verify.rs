@@ -27,6 +27,8 @@ impl Inner {
     ///
     /// With what is wrong.
     pub(super) fn verify(&self, floating: Option<&HashSet<usize>>) {
+        // The pages' counts of objects with drop glue, the cursors' too.
+        self.flush_cursor_counts(&mut self.space.borrow_mut());
         if let Err(problem) = self.check(floating) {
             panic!("heap verifier: {problem}");
         }
@@ -44,6 +46,7 @@ impl Inner {
     ///
     /// With what is wrong.
     pub(super) fn verify_space(&self) {
+        self.flush_cursor_counts(&mut self.space.borrow_mut());
         if let Err(problem) = self.check_space() {
             panic!("heap verifier: {problem}");
         }
@@ -101,10 +104,10 @@ impl Inner {
                     _ => 0,
                 })
                 .fold(0usize, usize::saturating_add);
-            if marked != self.used.get() {
+            if marked != self.used_now() {
                 return Err(format!(
                     "the slots in use add up to {marked}, not {}, once the sweep is done",
-                    self.used.get()
+                    self.used_now()
                 ));
             }
         }
@@ -473,10 +476,10 @@ impl Inner {
             }
         }
         // While the sweep runs, the heap counts what it used before.
-        if !self.sweeping.get() && used != self.used.get() {
+        if !self.sweeping.get() && used != self.used_now() {
             return Err(format!(
                 "the slots in use add up to {used}, not {}",
-                self.used.get()
+                self.used_now()
             ));
         }
         if committed != space.committed_total {

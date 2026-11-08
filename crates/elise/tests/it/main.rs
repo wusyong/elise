@@ -12,6 +12,8 @@
 )]
 
 #[cfg(not(any(loom, shuttle)))]
+mod alloc;
+#[cfg(not(any(loom, shuttle)))]
 mod concurrent;
 #[cfg(not(any(loom, shuttle)))]
 mod engine;
@@ -43,6 +45,8 @@ mod sites;
 mod sweep;
 #[cfg(not(any(loom, shuttle)))]
 mod token;
+#[cfg(not(any(loom, shuttle)))]
+mod walk;
 #[cfg(not(any(loom, shuttle)))]
 mod weak;
 #[cfg(not(any(loom, shuttle)))]

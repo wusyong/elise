@@ -8,8 +8,11 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use elise::{
-    Gc, GcObject, Heap, HeapOptions, HeapVector, LocalExternal, Member, Mutation, Persistent,
+    Gc, GcObject, Heap, HeapOptions, HeapVector, LocalExternal, Member, Mutation, Persistent, Site,
 };
+
+/// The site of `alloc_beside`'s objects.
+static SITE: Site = Site::new();
 
 /// A node with a finalizer: every one is on the nursery's list of them.
 #[derive(GcObject)]
@@ -222,12 +225,13 @@ fn an_old_vectors_edges_keep_young_objects() {
     heap.collect();
     heap.mutate(|cx| {
         let list = list.get(cx);
-        // Past its capacity: a new array, young, takes the edges.
+        // Past its capacity: a new array, old as the vector is, takes the
+        // edges.
         for value in 0..5 {
             list.push(cx, node(cx, value, None, &drops));
         }
     });
-    // The array is promoted with its elements by the second scavenge.
+    // The elements are promoted by the second scavenge.
     heap.scavenge();
     heap.scavenge();
     heap.mutate(|cx| {
@@ -586,4 +590,79 @@ fn a_panic_ends_the_pretenuring() {
         node(cx, 1, None, &drops);
     });
     assert!(heap.stats().young_bytes > 0);
+}
+
+/// `alloc_beside` allocates in its owner's generation: beside an old owner
+/// straight in the old one, beside a young one in the nursery.
+#[test]
+fn objects_allocated_beside_their_owner_are_in_its_generation() {
+    let drops = Rc::default();
+    let mut heap = heap(4);
+    let old = old_node(&mut heap, &drops);
+    let young_before = heap.stats().young_bytes;
+    let (beside_old, address_before) = heap.mutate(|cx| {
+        let data = cx.alloc_beside(
+            old.get(cx),
+            &SITE,
+            NodeInit {
+                next: None,
+                value: Cell::new(1),
+                drops: LocalExternal::new(Drops(drops.clone())),
+            },
+        );
+        (Persistent::new(cx, data), address(data))
+    });
+    assert_eq!(heap.stats().young_bytes, young_before, "old from the start");
+    let beside_young = heap.mutate(|cx| {
+        let owner = node(cx, 2, None, &drops);
+        let data = cx.alloc_beside(
+            owner,
+            &SITE,
+            NodeInit {
+                next: None,
+                value: Cell::new(3),
+                drops: LocalExternal::new(Drops(drops.clone())),
+            },
+        );
+        Persistent::new(cx, data)
+    });
+    heap.scavenge();
+    assert_eq!(
+        heap.stats().last_scavenge.survived_objects,
+        1,
+        "the young one's data"
+    );
+    heap.mutate(|cx| {
+        assert_eq!(address(beside_old.get(cx)), address_before);
+        assert_eq!(beside_old.get(cx).value.get(), 1);
+        assert_eq!(beside_young.get(cx).value.get(), 3);
+    });
+}
+
+/// A vector beside an old owner is old with its store, and an old vector's
+/// store grows old: neither is copied by scavenges.
+#[test]
+fn a_vector_and_its_store_follow_their_generation() {
+    let drops = Rc::default();
+    let mut heap = heap(4);
+    let old = old_node(&mut heap, &drops);
+    let elements = heap.mutate(|cx| Persistent::new(cx, HeapVector::<Node>::new(cx, 1)));
+    heap.collect();
+    let young_before = heap.stats().young_bytes;
+    let beside = heap.mutate(|cx| {
+        let vector = HeapVector::<Node>::new_beside(cx, old.get(cx), 1);
+        let elements = elements.get(cx);
+        for _ in 0..5 {
+            // The old vector grows past its capacity, twice.
+            elements.push(cx, old.get(cx));
+            vector.push(cx, old.get(cx));
+        }
+        Persistent::new(cx, vector)
+    });
+    assert_eq!(heap.stats().young_bytes, young_before, "all old");
+    heap.scavenge();
+    heap.mutate(|cx| {
+        assert_eq!(beside.get(cx).len(), 5);
+        assert_eq!(elements.get(cx).len(), 5);
+    });
 }

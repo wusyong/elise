@@ -191,10 +191,13 @@ GC 的每一步都在安全點開始和收尾（scavenge、full GC 和 marking �
 - Mark 只讀 `Member` 欄位（`[Member<T>; N]` 的 `N` 條）和陣列的 `capacity` 以下的邊。
 - Sweep 在跑 finalizer 之前把 heap 整理好（頁的狀態、空區段、`available`、pool 都放回去）。
 - discard 只對進 pool 之後過了一輪 GC 的頁；交給 worker 的頁是 `Discarding`，安全點拿回之前沒有人拿（I9）。
+- `publish` 和快路的 `publish_bumped` 設 `finalizable` 的 bit 用一般的讀和寫（`set_finalizable_alone`），只在 heap 的 thread、在用的頁上（I6）；新增設 bit 的地方，如果在別的 thread 或交出去的頁上，要用 atomic 的 or（`set_finalizable`）。
+- 快路配置的有 drop glue 的物件，頁上的計數（`finalizable_objects`、要在 heap 的 thread 上 finalize 的 `main_objects`）先記在它的 cursor 上（`Cursor::finalizable`、`main`），在 sweep 照計數交出頁之前、cursor 換頁之前（`refill`）和 verifier 數之前加回頁上（`flush_cursor_counts`）。`main_objects` 少算，有 `LocalExternal` 的頁就會交給 sweep 的 worker，`!Send` 的值在別的 thread 上 drop（I6）；新增讀這兩個計數的地方要先加回。
+- 配置的量照 cursor 拿到的整段算（`refill` 的 `count_allocated`）：`used` 和 `allocated` 含 cursor 還沒用的尾巴，要精確的地方扣掉（`used_now`、門檻的 `allocated_past`，GC 清掉 cursor 時從 `used` 扣掉）；verifier 比的是 `used_now`。帳只關乎 GC 的時機和報給 engine 的大小，不關乎記憶體安全。執行時的型別的物件（`raw` 的 `allocate`）照大小拿 size class、經過同一個 `Inner::allocate` 和 `publish`，帳一樣。
 
 ### `crates/elise/src/heap/young.rs`：nursery、write barrier、scavenge（I1、I3、I10）
 
-- 每個寫 `Member` 的地方都呼叫 `write_barrier`（`HeapVector::new` 寫自己的 `store` 也要：vector 可能因為 nursery 剛好滿了而在 old），每個寫 `WeakMember` 的地方都呼叫 `weak_barrier`；新增寫邊的 API 時也要。
+- 每個寫 `Member` 的地方都呼叫 `write_barrier`（`HeapVector::new` 寫自己的 `store` 也要：vector 可能因為 nursery 剛好滿了而在 old），每個寫 `WeakMember` 的地方都呼叫 `weak_barrier`；新增寫邊的 API 時也要。一開始就配在 old 的物件（`alloc_beside` 的擁有者在 old、`HeapVector` 的 store 跟著在 old 的 vector、有 JS 邊的型別、pretenure）和其他物件一樣經過 `InitSlot::field`、`MemberArray::write` 寫邊，所以它指向 young 的邊一樣記進 slot set（I10）；它們只是不進 nursery，配置走 `allocate_old`，marking 期間拿到的格子和其他配在 old 的一樣已經是黑的。
 - copy 的 pair 的 value 經過 `update`（strong）、key 記進 copier 的清單；`update_weak` 清 key 時一起清 value。
 - `update_weak` 也更新 id 表的 young 清單（`IdTable::update_young`）；`IdTable::insert` 在物件是 young 時列進清單。
 - `update_weak` 在 copy 全部做完之後、from-space 的頁放掉之前跑：copy 的 weak 欄位、weak 的 slot set 和 weak root 指向 from-space 的，照 header 的去向改或清成 0；升上去的 copy 和 weak 的 slot set 裡還指向 young 的放回 weak 的 slot set。
@@ -238,6 +241,16 @@ GC 的每一步都在安全點開始和收尾（scavenge、full GC 和 marking �
 - `write_edge`、`write_bits` 只經過 `Inner::write_raw_edge`；`edge` 檢查格子在 cage 裡。GC 新增讀執行時的型別的邊的地方，要先用 `raw::is_i31` 跳過 `I31`；scavenge 經過 `evacuate` 的值都已經跳過。
 - 不經過操作的入口（`alloc_bits`、`write_bits_in` 等）都在 `&mut Heap` 或 `&Heap` 上、從不 GC；`write_bits_in` 只經過 `Inner::write_raw_edge`，`edge_in` 檢查格子在 cage 裡。GC 新增讀 root 的地方（root 表之外），要一起讀 `Inner::frame_roots`（`root_offsets`、scavenge 的 root）；新增會在 frame 裡開始 GC 的路，要先拿到 frame 的 root。
 - 退休等的計數：`gc_started` 在每個 full GC 的開始（`Inner::collect`、`start_marking_with` 的 `finish_sweeping` 之後），`gc_finished` 在 `sweep_done` 的最後。新增開始 full GC 的路、讓 sweep 或 heap 的 drop 讀到執行時的型別（例如給它們 drop glue）、或讓 GC 在別的時候讀死物件的 header 時，要重新看 I14 的論證。
+
+### `crates/elise/src/heap/walk.rs`：heap snapshot 的走訪（I1、I2、I3、I14）
+
+`Heap::walk` 交出 heap 拿著的每個物件（`HeapObject`）、它的邊的目標和 JS 的邊的參照，給 `Gc<'gc, Erased>`；`'gc` 是那次操作的，和 `mutate` 一樣不 GC。
+- **哪些格子是物件**：拿 `&mut Heap`，先收完 sweep（`finish_sweeping`：worker 的 sweep 收手、結果套用，heap 的 thread 那種頁和死掉的 large object 掃完），所以沒有 `unswept` 的頁（`assert`），死物件的格子都回到空區段。這時 size class 的頁上，一格不在頁的空區段、也不在那一級的 cursor 還沒 bump 的那段（GC 時 cursor 都清掉，所以 cursor 的頁一定是那一級的頁），就是配置拿走、寫完了的物件（I1：配置只從空區段和 cursor 拿；safe 的 API 寫不出會 panic 的 init，cage 滿了在拿到格子之前就 panic，所以拿走的格子在操作繼續之前都寫完、發布了）。large object 的頁是一個物件（死的在 sweep 收完時都放掉了）。nursery 的頁從頭到頂是物件和 filler（I1，目前那一頁的頂在 cursor 裡），一個一個照 header 算大小走。header 的型別沒有登記的格子跳過（新的頁的 0、debug build 的 poison）：這只是多一層保險，不是論證的一部分。marking 進行中也一樣（那時 sweep 本來就做完了）。
+- **讀的東西**：物件的 header、layout 列的邊（`u32`）和 JS 的邊的位址，都在操作裡、heap 的 thread 上讀；同時在跑的只有 concurrent marking 的 marker（只讀物件、寫 bitmap）和空頁的 discard（不碰有物件的頁），沒有別的 thread 寫物件。邊的目標照 I2 是 0 或 heap 拿著的物件（strong 的邊留住它；weak 的邊和 ephemeron 的目標死了在釋放之前清成 0），所以也是走訪的物件，`HeapObject::new` 讀得到它的 header。
+- **執行時的型別（I14）**：走訪交出垃圾，所以它讀的型別可能是已經退休的。`types::info`、`entry` 的前提照樣成立：交出的是 heap 拿著、還沒放掉的物件；一個執行時的型別只在退休之後才開始的完整 GC 做完時放掉，那次 GC 開始時 nursery 裡沒有它的物件（開始前的 scavenge 清空 nursery，之後不再配置它），old 裡它的死物件由那次的 sweep 放掉，而走訪先收完 sweep。邊照 `Entry::raw_edges` 讀，`I31` 跳過，和 marker 一樣。
+- **交出的物件在操作裡活著**：操作裡不 GC（I3）。沒有 marking 時，交出的垃圾寫進活的物件也沒事：下一次 GC 從那裡走到它。marking 進行中，交出的可能是 marking 會放掉的（開始時就是垃圾的、只有 weak 的邊走得到的），寫進一個掃過的物件之後 SATB 不會標它：所以 `Walk::new` 對每個物件照 weak 的讀取標上（`read_weak`，`from_engine` 的做法；young 的不標，scavenge 從邊走到它們），之後交出的都是這次 marking 會留下的（floating garbage，verifier 照 weak 的讀取記下）。邊的目標都是走訪的物件，也都標了。
+- **JS 的邊**：交出 `&JsEdge`（I11：bytes 是 engine 的，heap 不讀寫），活到操作結束。
+- 欄位的名字（`FieldInfo::name`）是 derive 在編譯時寫的 C 字串，和 layout 的安全無關。
 
 ### `crates/elise/src/token.rs`：token 的 cell（I12）
 

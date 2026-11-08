@@ -41,8 +41,10 @@ mod fragmentation;
 mod schedule;
 mod sweep;
 mod verify;
+mod walk;
 mod young;
 pub use fragmentation::Fragmentation;
+pub use walk::{Edge, EdgeKind, HeapObject, Walk};
 
 use crate::{GcObject, HeapField, HeapType, ObjectInit};
 
@@ -163,6 +165,10 @@ pub struct HeapStats {
     /// scavenge's thread gave back unused counts again when taken again.
     pub old_ranges: u64,
     pub old_range_slots: u64,
+    /// Allocations that took the slow path: a cursor's range used up, a
+    /// large object, the nursery, a site to count; the rest were a bump of
+    /// their size class's cursor.
+    pub slow_allocations: u64,
     /// With `HeapOptions::measure_fragmentation`, the old generation's
     /// pages when the last sweep was done, and when the last marking
     /// started.
@@ -359,6 +365,8 @@ pub(crate) struct Inner {
     sites: RefCell<Sites>,
     /// Allocations a tenured site sent to the old generation.
     pretenured: Cell<u64>,
+    /// `HeapStats::slow_allocations`.
+    slow_allocations: Cell<u64>,
     /// Bytes of the nursery's objects.
     young_used: Cell<usize>,
     /// What a large object's commit is rounded up to.
@@ -449,12 +457,20 @@ enum PageState {
 }
 
 /// A range of free slots of a class's current page, by data offset: the
-/// next slot's, and the one past the range. Empty for no page.
+/// next slot's, and the one past the range. Empty for no page. Its range
+/// is counted as allocated as it is taken (`Inner::refill`; cppgc's
+/// `StatsCollector` counts a linear allocation buffer so), the rest of it
+/// taken back where the count must be exact (`Inner::unused_tails`).
 #[derive(Clone, Copy, Default)]
 struct Cursor {
     next: usize,
     limit: usize,
     page: usize,
+    /// Objects with drop glue (to finalize on the heap's thread) allocated
+    /// from it on the fast path, not yet added to its page's counts
+    /// (`Inner::flush_cursor_counts`).
+    finalizable: u32,
+    main: u32,
 }
 
 /// An operation on the heap: what allocates and reads and writes edges. No
@@ -552,6 +568,7 @@ impl Heap {
                 pretenure: Cell::new(0),
                 sites: RefCell::new(Sites::default()),
                 pretenured: Cell::new(0),
+                slow_allocations: Cell::new(0),
                 young_used: Cell::new(0),
                 granularity: cage::commit_granularity(),
                 allocated: Cell::new(0),
@@ -602,6 +619,27 @@ impl Heap {
             inner: &self.inner,
             _invariant: PhantomData,
         })
+    }
+
+    /// Runs one operation over every object the heap holds, for a heap
+    /// snapshot (V8's snapshot generator walking its heap): at this
+    /// safepoint, the last full GC's sweep finished first (as V8 finishes
+    /// its own before a snapshot), no GC's work started. `f` is given the
+    /// objects the last GC kept and those allocated since, garbage or not;
+    /// right after a full GC, the live ones. While a marking runs, what it
+    /// hands out is marked, as a weak read marks. It looks at every page:
+    /// only for snapshots.
+    pub fn walk<R>(&mut self, f: impl for<'gc> FnOnce(&Mutation<'gc>, &Walk<'gc>) -> R) -> R {
+        let platform = self.inner.platform.clone();
+        self.inner.finish_sweeping(&*platform);
+        let walk = Walk::new(&self.inner);
+        f(
+            &Mutation {
+                inner: &self.inner,
+                _invariant: PhantomData,
+            },
+            &walk,
+        )
     }
 
     /// Whether `mutate` would do a GC's work first: a scavenge, a full GC,
@@ -803,7 +841,7 @@ impl Heap {
         HeapStats {
             gcs: self.inner.gcs.get(),
             scavenges: self.inner.scavenges.get(),
-            used_bytes: self.inner.used_bytes(),
+            used_bytes: self.inner.used_now().saturating_add(young_bytes),
             young_bytes,
             nursery_bytes: self.inner.young.borrow().capacity_bytes(),
             committed_bytes: self.inner.space.borrow().committed_total,
@@ -825,6 +863,7 @@ impl Heap {
             fragmentation: self.inner.fragmentation.get(),
             fragmentation_at_marking: self.inner.fragmentation_at_marking.get(),
             pretenured_objects: self.inner.pretenured.get(),
+            slow_allocations: self.inner.slow_allocations.get(),
             id_chunks: self.inner.ids.borrow().chunks(),
         }
     }
@@ -843,6 +882,16 @@ impl Heap {
     /// heap the engine drives tells it as it grows (cppgc's
     /// `ReportBufferedAllocationSizeIfPossible`).
     pub fn used_bytes(&self) -> usize {
+        self.inner
+            .used_now()
+            .saturating_add(self.inner.young_used.get())
+    }
+
+    /// `used_bytes` and the rest of the cursors' ranges, which the heap
+    /// counts as they are taken: at most a range per size class more, but
+    /// read at once (`used_bytes` adds up the cursors), for a check of how
+    /// far the heap has grown after each operation.
+    pub fn counted_bytes(&self) -> usize {
         self.inner
             .used
             .get()
@@ -906,7 +955,7 @@ impl Heap {
         );
         inner.drain_barrier();
         let platform = inner.platform.clone();
-        let used = inner.used.get().saturating_add(inner.young_used.get());
+        let used = inner.used_now().saturating_add(inner.young_used.get());
         let marking = inner.marking.get_mut().as_mut().expect("a marking runs");
         let marker = marking.marker.clone();
         let driven = marking.driven.as_mut().expect("a driven marking's state");
@@ -1126,7 +1175,7 @@ impl<'gc> Mutation<'gc> {
     ///
     /// If the cage is full: no GC runs in an operation.
     pub fn alloc<I: ObjectInit<'gc>>(&self, init: I) -> crate::Gc<'gc, I::Object> {
-        self.alloc_at(0, init)
+        self.alloc_at(0, false, init)
     }
 
     /// A new object from `site`, written in place from `init`: in the old
@@ -1136,25 +1185,99 @@ impl<'gc> Mutation<'gc> {
     ///
     /// As `alloc`.
     pub fn alloc_in<I: ObjectInit<'gc>>(&self, site: &Site, init: I) -> crate::Gc<'gc, I::Object> {
-        self.alloc_at(site.index(), init)
+        // With no nursery a site has nothing to decide: its number isn't
+        // looked up, nor its objects counted.
+        if self.inner.has_no_nursery() {
+            return self.alloc_at(0, false, init);
+        }
+        self.alloc_at(site.index(), false, init)
     }
 
-    /// A new object from the site numbered `site` (0 for none).
-    fn alloc_at<I: ObjectInit<'gc>>(&self, site: u32, init: I) -> crate::Gc<'gc, I::Object> {
+    /// `alloc_in`, in `owner`'s generation: straight in the old one if
+    /// `owner` is there. For data hung on its owner (a node's text and
+    /// attributes), which lives as long as it: young under an old owner, it
+    /// would only be copied by scavenges till promoted, its edge from the
+    /// owner remembered meanwhile. (Blink's DOM has no young generation:
+    /// a node and its data are all allocated old.)
+    ///
+    /// # Panics
+    ///
+    /// As `alloc`.
+    pub fn alloc_beside<U, I: ObjectInit<'gc>>(
+        &self,
+        owner: crate::Gc<'gc, U>,
+        site: &Site,
+        init: I,
+    ) -> crate::Gc<'gc, I::Object> {
+        if self.inner.has_no_nursery() {
+            return self.alloc_at(0, false, init);
+        }
+        let old = self.is_old(owner);
+        self.alloc_at(site.index(), old, init)
+    }
+
+    /// Whether `object` is in the old generation.
+    pub(crate) fn is_old<U>(&self, object: crate::Gc<'gc, U>) -> bool {
+        !self
+            .inner
+            .is_young(self.inner.offset_of(object.as_ptr().cast()))
+    }
+
+    /// A new object from the site numbered `site` (0 for none), in the old
+    /// generation if `old`.
+    fn alloc_at<I: ObjectInit<'gc>>(
+        &self,
+        site: u32,
+        old: bool,
+        init: I,
+    ) -> crate::Gc<'gc, I::Object> {
         type T<'gc, I> = <I as ObjectInit<'gc>>::Object;
         let ty = <T<'gc, I>>::__type();
         let index = ty.index();
+        let info = ty.info();
         // An object with a JS edge is old in a heap an engine drives: the
         // engine's reference to it never moves.
-        let old = self.inner.options.driven && !ty.entry().js_edges.is_empty();
-        let data = self.inner.allocate(ty.info().size() as usize, site, old);
+        let old = old || self.inner.options.driven && info.has_js_edges();
+        // The fast path (cppgc's `ObjectAllocator::AllocateObject`): an old
+        // object of no site to count, or any in a heap with no nursery, of
+        // a size class whose cursor has room: a bump and its header.
+        let class = info
+            .class()
+            .filter(|_| old && site == 0 || self.inner.has_no_nursery());
+        let bumped = class.and_then(|class| self.inner.bump(class));
+        let data = match bumped {
+            Some(data) => data,
+            None => self.inner.allocate_slowly(
+                object_bytes(info.size() as usize),
+                info.class(),
+                site,
+                old,
+            ),
+        };
         let ptr = self.inner.ptr(data).cast::<T<'gc, I>>();
         <T<'gc, I>>::__init(init, InitSlot { ptr, cx: self });
-        self.inner.publish(data, index, site, ty.info().finalizer());
+        match (bumped, class) {
+            (Some(_), Some(class)) => {
+                self.inner
+                    .publish_bumped(data, index, class, info.finalizer())
+            }
+            _ => self.inner.publish(data, index, site, info.finalizer()),
+        }
         // SAFETY: `ptr` is the object just initialized, in the cage, which
         // no GC changes before `'gc` ends.
         unsafe { crate::Gc::from_raw(NonNull::new_unchecked(ptr)) }
     }
+}
+
+/// An object's bytes with its header, from its data's `size`.
+///
+/// # Panics
+///
+/// If they don't fit a quarter of the cage.
+fn object_bytes(size: usize) -> usize {
+    size.checked_add(HEADER_BYTES)
+        .filter(|&bytes| bytes <= MAX_OBJECT_BYTES)
+        .expect("an object fits a quarter of the cage")
 }
 
 impl Inner {
@@ -1191,10 +1314,98 @@ impl Inner {
     /// panic, a sweep would neither scan nor finalize it, only free it
     /// again, and a scavenge wouldn't reach it.
     pub(crate) fn allocate(&self, size: usize, site: u32, old: bool) -> usize {
-        let bytes = size
-            .checked_add(HEADER_BYTES)
-            .filter(|&bytes| bytes <= MAX_OBJECT_BYTES)
-            .expect("an object fits a quarter of the cage");
+        let bytes = object_bytes(size);
+        let class = page::class_for(bytes);
+        if (old && site == 0 || self.has_no_nursery())
+            && let Some(data) = class.and_then(|class| self.bump(class))
+        {
+            return data;
+        }
+        self.allocate_slowly(bytes, class, site, old)
+    }
+
+    /// `allocate_in`, as allocation's slow path, counted.
+    fn allocate_slowly(&self, bytes: usize, class: Option<usize>, site: u32, old: bool) -> usize {
+        self.slow_allocations
+            .set(self.slow_allocations.get().saturating_add(1));
+        self.allocate_in(bytes, class, site, old)
+    }
+
+    /// Whether the heap has no nursery (`HeapOptions::nursery_bytes` 0):
+    /// its objects go straight to the old generation, and its sites decide
+    /// nothing.
+    #[inline]
+    pub(crate) fn has_no_nursery(&self) -> bool {
+        self.options.nursery_bytes == 0
+    }
+
+    /// The next slot of `class`'s cursor, if its range has one: allocation's
+    /// fast path, the range counted as it was taken.
+    #[inline]
+    fn bump(&self, class: usize) -> Option<usize> {
+        let cursor = &self.cursors[class];
+        let mut range = cursor.get();
+        if range.next >= range.limit {
+            return None;
+        }
+        let data = range.next;
+        // The range is in one page, so next + slot_bytes is at most its end.
+        range.next = data.saturating_add(page::CLASSES[class]);
+        cursor.set(range);
+        asan::unpoison(self.header(data).cast(), page::CLASSES[class]);
+        Some(data)
+    }
+
+    /// The bytes the cursors' ranges have left: counted as allocated, not
+    /// allocated yet.
+    fn unused_tails(&self) -> usize {
+        self.cursors
+            .iter()
+            .map(|cursor| {
+                let cursor = cursor.get();
+                cursor.limit.saturating_sub(cursor.next)
+            })
+            .fold(0, usize::saturating_add)
+    }
+
+    /// The bytes the old generation's objects use, exactly: what was counted
+    /// but the cursors' tails.
+    pub(crate) fn used_now(&self) -> usize {
+        self.used.get().saturating_sub(self.unused_tails())
+    }
+
+    /// Adds what the cursors' objects with drop glue owe their pages'
+    /// counts (`Cursor::finalizable`): before those counts are read (a
+    /// sweep's handing out, the verifier) or the cursor leaves its page.
+    fn flush_cursor_counts(&self, space: &mut Space) {
+        for cursor in &self.cursors {
+            let mut range = cursor.get();
+            if range.finalizable == 0 && range.main == 0 {
+                continue;
+            }
+            if let Some(PageState::Small(page)) = space.states.get_mut(range.page) {
+                page.finalizable_objects = page
+                    .finalizable_objects
+                    .saturating_add(range.finalizable as usize);
+                page.main_objects = page.main_objects.saturating_add(range.main as usize);
+            }
+            range.finalizable = 0;
+            range.main = 0;
+            cursor.set(range);
+        }
+    }
+
+    /// `allocate` of `bytes`, header included, whose size class (`None`:
+    /// large) the caller knows: a type's, worked out once
+    /// (`TypeInfo::class`).
+    pub(crate) fn allocate_in(
+        &self,
+        bytes: usize,
+        class: Option<usize>,
+        site: u32,
+        old: bool,
+    ) -> usize {
+        debug_assert_eq!(class, page::class_for(bytes));
         let mut sites = (site != 0).then(|| self.sites.borrow_mut());
         let tenured = sites.as_ref().is_some_and(|sites| sites.is_tenured(site));
         if tenured {
@@ -1214,16 +1425,24 @@ impl Inner {
         if let Some(sites) = &mut sites {
             sites.entered_old(site);
         }
-        self.allocate_old(bytes)
+        self.allocate_old(bytes, class)
     }
 
     /// Room in the old generation for an object of `bytes`, header
-    /// included: its data's offset.
-    fn allocate_old(&self, bytes: usize) -> usize {
-        let (data, bytes) = match page::class_for(bytes) {
-            Some(class) => (self.allocate_small(class), page::CLASSES[class]),
-            None => self.allocate_large(bytes),
+    /// included, of size class `class` (`None`: large): its data's offset.
+    fn allocate_old(&self, bytes: usize, class: Option<usize>) -> usize {
+        let Some(class) = class else {
+            let (data, bytes) = self.allocate_large(bytes);
+            self.count_allocated(bytes);
+            return data;
         };
+        // A size class's range is counted as its cursor takes it.
+        self.allocate_small(class)
+    }
+
+    /// `bytes` allocated in the old generation: toward the next GC, in use,
+    /// and black while a marking the engine drives counts the live bytes.
+    fn count_allocated(&self, bytes: usize) {
         self.allocated
             .set(self.allocated.get().saturating_add(bytes));
         self.used.set(self.used.get().saturating_add(bytes));
@@ -1231,7 +1450,6 @@ impl Inner {
             self.black_bytes
                 .set(self.black_bytes.get().saturating_add(bytes));
         }
-        data
     }
 
     fn allocate_small(&self, class: usize) -> usize {
@@ -1248,22 +1466,31 @@ impl Inner {
         data
     }
 
-    /// A new range for `class`'s cursor.
+    /// A new range for `class`'s cursor. Out of line, as are the other
+    /// slow paths of allocation: inlined, they made allocation a 3.8 KiB
+    /// function whose every call saved the registers they use (cppgc's
+    /// `ObjectAllocator::OutOfLineAllocate`).
+    #[cold]
+    #[inline(never)]
     fn refill(&self, class: usize) -> Cursor {
         let mut space = self.space.borrow_mut();
+        // The cursor may leave its page: its counts first.
+        self.flush_cursor_counts(&mut space);
         let page = self.cursors[class].get().page;
         let ranged = matches!(space.states.get(page), Some(PageState::Small(page)) if !page.ranges.is_empty());
         if self.sweeping.get() && !ranged && space.available[class].is_empty() {
             self.sweep_for(&mut space, class);
         }
-        refill(
+        let range = refill(
             &self.cage,
             &mut space,
             &self.mark_table,
             self.marking_active.get(),
             class,
             self.cursors[class].get().page,
-        )
+        );
+        self.count_allocated(range.limit.saturating_sub(range.next));
+        range
     }
 
     fn free_page(&self, space: &mut Space) -> usize {
@@ -1277,6 +1504,8 @@ impl Inner {
     /// Room for a large object of `bytes`, header included, on pages of its
     /// own (the first free run of pages long enough, else new ones), its
     /// bytes committed: its data's offset, and its committed bytes.
+    #[cold]
+    #[inline(never)]
     fn allocate_large(&self, bytes: usize) -> (usize, usize) {
         let mut space = self.space.borrow_mut();
         let pages = bytes.div_ceil(PAGE_BYTES);
@@ -1336,10 +1565,8 @@ impl Inner {
             }
             return;
         }
-        if self.marking_active.get()
-            && let Some(marking) = self.marking.borrow_mut().as_mut()
-        {
-            marking.allocated(data);
+        if self.marking_active.get() {
+            self.allocated_while_marking(data);
         }
         // The bitmaps are the page's: only an object with drop glue looks
         // its page up, off allocation's fast path. In debug builds every
@@ -1358,6 +1585,56 @@ impl Inner {
                 object.main = finalizer == Finalizer::Main;
             }
             _ => unreachable!("an object is allocated on a page in use"),
+        }
+    }
+
+    /// `publish` for an object of `class` its cursor's bump allocated
+    /// (`bump`): old, of no site, on its cursor's page, whose bitmaps it
+    /// reaches through the mark table and whose counts the cursor holds
+    /// till its page's are read (`flush_cursor_counts`).
+    #[inline]
+    pub(crate) fn publish_bumped(
+        &self,
+        data: usize,
+        index: u32,
+        class: usize,
+        finalizer: Finalizer,
+    ) {
+        // SAFETY: the object's header, in a committed page, 8-aligned.
+        unsafe {
+            self.header(data).write(index);
+            self.header(data).add(1).write(0);
+        }
+        let marking = self.marking_active.get();
+        if marking {
+            self.allocated_while_marking(data);
+        }
+        let finalizable = finalizer != Finalizer::None;
+        // In debug builds every object is marked, for the next GC to poison
+        // it if it dies (as `publish`).
+        let mark = cfg!(debug_assertions) && !marking;
+        if !finalizable && !mark {
+            return;
+        }
+        self.mark_table.publish(data, finalizable, mark);
+        if finalizable {
+            let cursor = &self.cursors[class];
+            let mut range = cursor.get();
+            range.finalizable = range.finalizable.saturating_add(1);
+            if finalizer == Finalizer::Main {
+                range.main = range.main.saturating_add(1);
+            }
+            cursor.set(range);
+        }
+    }
+
+    /// An object allocated while a marking runs: the verifier's record of
+    /// it (black, so floating garbage if it dies).
+    #[cold]
+    #[inline(never)]
+    fn allocated_while_marking(&self, data: usize) {
+        if let Some(marking) = self.marking.borrow_mut().as_mut() {
+            marking.allocated(data);
         }
     }
 
@@ -1501,9 +1778,19 @@ impl Inner {
     fn at_limit(&self, marking: bool) -> bool {
         let limit = self.limit.get();
         if !marking {
-            return self.allocated.get() >= limit;
+            return self.allocated_past(limit);
         }
-        self.allocated.get() >= limit.saturating_add(self.overshoot.get())
+        self.allocated_past(limit.saturating_add(self.overshoot.get()))
+    }
+
+    /// Whether the old generation has allocated `bytes` since the last GC:
+    /// the cursors' ranges count whole as they are taken, so a range takes
+    /// the count past a small limit at once; past it, their tails are taken
+    /// back (only then, off the safepoint's usual path).
+    #[inline]
+    fn allocated_past(&self, bytes: usize) -> bool {
+        self.allocated.get() >= bytes
+            && self.allocated.get().saturating_sub(self.unused_tails()) >= bytes
     }
 
     /// The overshoot margin for a marking starting now: half the limit, or
@@ -1533,7 +1820,7 @@ impl Inner {
     /// runs one alongside, and the old generation reached half its limit
     /// (the least of cppgc's range for its incremental marking's start).
     fn starts_marking(&self) -> bool {
-        self.concurrent && self.allocated.get() >= self.limit.get() / 2
+        self.concurrent && self.allocated_past(self.limit.get() / 2)
     }
 
     /// Whether to check the heap after a GC. Not under Miri, which checks
@@ -1741,7 +2028,10 @@ impl Inner {
         self.marking_active.set(true);
         self.barrier_state.set_marking(true);
         self.counts_live.set(js.is_some());
-        self.black_bytes.set(0);
+        // The cursors' tails, counted as allocated already, are black now:
+        // what is allocated from them is live at the end (their rest is
+        // taken back from the count as used is read, `used_now`).
+        self.black_bytes.set(self.unused_tails());
         self.shared.roots.watch_removals(true);
         let verifies = self.verifies();
         let marker = concurrent::Marker::new(
@@ -1977,6 +2267,12 @@ impl Inner {
         let gc = self.gcs.get().saturating_add(1);
         let phase = Instant::now();
         platform.trace_begin("Gc.Sweep");
+        // The pages are handed out by their counts of objects with drop
+        // glue: the cursors' first.
+        {
+            let mut space = self.space.borrow_mut();
+            self.flush_cursor_counts(&mut space);
+        }
         let space = self.space.get_mut();
         let main_pages = self.main_pages.get_mut();
         let dead_large = self.dead_large.get_mut();
@@ -2023,7 +2319,11 @@ impl Inner {
         for pages in &mut space.available {
             pages.clear();
         }
+        // The cursors' tails, counted in use as their ranges were taken, are
+        // free slots the sweep finds again.
         for cursor in &self.cursors {
+            let tail = cursor.get().limit.saturating_sub(cursor.get().next);
+            self.used.set(self.used.get().saturating_sub(tail));
             cursor.set(Cursor::default());
         }
         // Discard the pages in the pool since an earlier GC: on a worker,
@@ -2456,6 +2756,7 @@ fn refill(
                 next,
                 limit,
                 page: number,
+                ..Cursor::default()
             };
         }
         number = match space.available[class].pop() {

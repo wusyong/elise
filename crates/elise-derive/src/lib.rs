@@ -10,7 +10,7 @@
 //!   `cx.alloc(ElementInit { .. })` writes it in place, and knows the object
 //!   from it (`ObjectInit`). A field type that isn't a `HeapField` (`Box`,
 //!   `Vec`, a reference) fails here, pointed at the field.
-//! - The layout the GC walks: each field's offset and kind, in a static
+//! - The layout the GC walks: each field's offset, kind and name, in a static
 //!   with the type's index in the heap's type table (assigned on first
 //!   use, as cppgc's `GCInfoTrait<T>::Index()`).
 //! - An impl of a trait for every `T: Drop` and one for the struct, which
@@ -30,6 +30,7 @@
 
 use proc_macro::TokenStream;
 use quote::{format_ident, quote, quote_spanned};
+use syn::ext::IdentExt;
 use syn::spanned::Spanned;
 use syn::{Data, DeriveInput, Fields, parse_macro_input};
 
@@ -69,6 +70,16 @@ fn expand(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
         .iter()
         .filter_map(|field| field.ident.as_ref())
         .collect();
+    // Each field's name as a C string, for a heap snapshot's edges (which
+    // V8 reads as `const char*`, after its callback).
+    let c_names: Vec<_> = names
+        .iter()
+        .map(|name| {
+            let mut bytes = name.unraw().to_string().into_bytes();
+            bytes.push(0);
+            syn::LitByteStr::new(&bytes, name.span())
+        })
+        .collect();
     let types: Vec<_> = fields.named.iter().map(|field| &field.ty).collect();
     let field_vis: Vec<_> = fields.named.iter().map(|field| &field.vis).collect();
     // Each at its field's type, so that a type that can't be a field is
@@ -95,6 +106,12 @@ fn expand(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
                         offset: ::core::mem::offset_of!(#name, #names),
                         kind: <#types as ::elise::HeapField>::KIND,
                         main_thread_drop: <#types as ::elise::HeapField>::MAIN_THREAD_DROP,
+                        name: const {
+                            match ::core::ffi::CStr::from_bytes_with_nul(#c_names) {
+                                ::core::result::Result::Ok(name) => name,
+                                ::core::result::Result::Err(_) => ::core::panic!("a field's name"),
+                            }
+                        },
                     }, )* ],
                 ));
                 &TYPE

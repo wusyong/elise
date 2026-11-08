@@ -12,9 +12,8 @@
 //! nothing).
 //!
 //! The fuzz target (`crates/elise/fuzz`) includes this file as it is;
-//! `fuzz.rs` replays the regressions the fuzzer found with it, and seeds
-//! come from kun's `gc_bench fuzz-seeds`, which encodes operations with
-//! `encode`.
+//! `fuzz.rs` replays the regressions the fuzzer found with it, and its
+//! tests make their inputs with `encode`.
 //!
 //! The encoding: a byte of options (bit 0: stress; bit 1: a pool of two
 //! workers rather than marking inline; bit 2: a GC once a few KiB are

@@ -28,11 +28,13 @@ unsafe impl<T: HeapType> HeapType for HeapVector<T> {
                     offset: offset_of!(HeapVector<MemberArray>, len),
                     kind: FieldKind::Data,
                     main_thread_drop: false,
+                    name: c"len",
                 },
                 FieldInfo {
                     offset: offset_of!(HeapVector<MemberArray>, store),
                     kind: FieldKind::Member,
                     main_thread_drop: false,
+                    name: c"store",
                 },
             ],
         ));
@@ -42,9 +44,23 @@ unsafe impl<T: HeapType> HeapType for HeapVector<T> {
 
 impl<T: HeapType> HeapVector<T> {
     pub fn new<'gc>(cx: &Mutation<'gc>, capacity: usize) -> Gc<'gc, Self> {
-        let store = MemberArray::new(cx, capacity);
+        Self::new_in(cx, capacity, false)
+    }
+
+    /// `new`, in `owner`'s generation (`Mutation::alloc_beside`).
+    pub fn new_beside<'gc, U>(
+        cx: &Mutation<'gc>,
+        owner: Gc<'gc, U>,
+        capacity: usize,
+    ) -> Gc<'gc, Self> {
+        Self::new_in(cx, capacity, cx.is_old(owner))
+    }
+
+    /// `new`, in the old generation if `old`.
+    fn new_in<'gc>(cx: &Mutation<'gc>, capacity: usize, old: bool) -> Gc<'gc, Self> {
+        let store = MemberArray::new(cx, capacity, old);
         let index = Self::__type().index();
-        let data = cx.inner.allocate(size_of::<Self>(), 0, false);
+        let data = cx.inner.allocate(size_of::<Self>(), 0, old);
         let ptr = cx.inner.ptr(data).cast::<Self>();
         let raw = compress(cx, Some(store));
         let vector = Self {
@@ -94,7 +110,12 @@ impl<T: HeapType> HeapVector<T> {
         let len = self.len();
         let mut store = self.store(cx);
         if len == store.capacity() {
-            let grown = MemberArray::new(cx, len.saturating_mul(2).max(4));
+            // The store follows the vector: an old vector's young store
+            // would only be copied till promoted.
+            let old = !cx
+                .inner
+                .is_young(cx.inner.offset_of((&raw const *self).cast()));
+            let grown = MemberArray::new(cx, len.saturating_mul(2).max(4), old);
             for i in 0..len {
                 grown.write(cx, i, store.edge(i).load(Ordering::Relaxed));
             }
@@ -162,14 +183,15 @@ unsafe impl HeapType for MemberArray {
 }
 
 impl MemberArray {
-    fn new<'gc>(cx: &Mutation<'gc>, capacity: usize) -> Gc<'gc, Self> {
+    /// An array of `capacity` empty edges, in the old generation if `old`.
+    fn new<'gc>(cx: &Mutation<'gc>, capacity: usize, old: bool) -> Gc<'gc, Self> {
         let bytes = capacity
             .checked_add(1)
             .and_then(|words| words.checked_mul(4))
             .expect("an array's size fits");
         let capacity = u32::try_from(capacity).expect("a capacity fits 32 bits");
         let index = Self::__type().index();
-        let data = cx.inner.allocate(bytes, 0, false);
+        let data = cx.inner.allocate(bytes, 0, old);
         let ptr = cx.inner.ptr(data).cast::<u32>();
         // SAFETY: the capacity and edges just allocated; the slot may hold
         // an old object's bytes, so every edge is cleared.

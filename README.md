@@ -29,6 +29,13 @@ from outliving the operation that holds them.
 - **Marking with a JS engine:** an engine can drive the marking, the way V8
   drives cppgc in Chrome's unified heap. Objects hold the engine's
   references, and wrappers hold objects' addresses.
+- **Heap snapshots:** `Heap::walk` hands out every object the heap holds,
+  with its type, size and edges by their fields' names, for an engine's
+  heap profiler.
+- **Types registered at run time** (`raw`): layouts an embedder gives as it
+  runs, such as a wasm engine's GC types, whose edges may hold 31-bit
+  integers (`I31`, wasm's `i31ref`); allocated by type index, and
+  collected with roots the embedder hands over.
 - **Pluggable threads:** a `Platform` decides where the parallel work runs.
   The default is a process-wide thread pool.
 

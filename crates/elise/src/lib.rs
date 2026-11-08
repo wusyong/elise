@@ -68,7 +68,10 @@ pub use elise_derive::GcObject;
 pub use ephemeron::EphemeronPair;
 pub use external::{External, LocalExternal};
 pub use gc_ptr::Gc;
-pub use heap::{Fragmentation, GcRecord, Heap, HeapOptions, HeapStats, InitSlot, Mutation};
+pub use heap::{
+    Edge, EdgeKind, Fragmentation, GcRecord, Heap, HeapObject, HeapOptions, HeapStats, InitSlot,
+    Mutation, Walk,
+};
 pub use ids::Id;
 pub use js::{
     JsEdge, JsEdgeLocal, JsEdgeSink, WrapperLocal, WrapperMarker, js_edges_of, type_index,

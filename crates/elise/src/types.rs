@@ -20,6 +20,8 @@ use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
+use crate::page;
+
 /// The largest object, header included: a quarter of the cage (one larger
 /// than a slot takes pages of its own).
 pub(crate) const MAX_OBJECT_BYTES: usize = crate::cage::CAGE_BYTES / 4;
@@ -35,6 +37,12 @@ pub struct TypeInfo {
     /// `drop_in_place`, if the type has drop glue (an `External`'s).
     drop: Option<unsafe fn(*mut u8)>,
     finalizer: Finalizer,
+    /// Its objects' size class, header included (`page::NO_CLASS`: large;
+    /// a `MemberArray`'s is its array's), worked out once.
+    class: u8,
+    /// Whether it has a JS edge (`JsEdge`): old from the start in a heap an
+    /// engine drives.
+    js_edges: bool,
 }
 
 /// Where an object's finalizer runs.
@@ -49,13 +57,15 @@ pub(crate) enum Finalizer {
     Main,
 }
 
-/// A field of an object: its offset, its kind and whether its drop glue
-/// must run on the heap's thread.
+/// A field of an object: its offset, its kind, whether its drop glue
+/// must run on the heap's thread, and its name (what a heap snapshot calls
+/// its edges: a C string, which an engine's profiler reads as one).
 #[doc(hidden)]
 pub struct FieldInfo {
     pub offset: usize,
     pub kind: FieldKind,
     pub main_thread_drop: bool,
+    pub name: &'static std::ffi::CStr,
 }
 
 /// What a field is to the GC.
@@ -145,9 +155,11 @@ impl TypeInfo {
         )]
         let size = size_of::<T>() as u32;
         let mut main = false;
+        let mut js_edges = false;
         let mut at = 0;
         while at < fields.len() {
             main = main || fields[at].main_thread_drop;
+            js_edges = js_edges || matches!(fields[at].kind, FieldKind::JsEdge);
             at = at.saturating_add(1);
         }
         Self {
@@ -167,11 +179,16 @@ impl TypeInfo {
             } else {
                 Finalizer::Sweeper
             },
+            class: page::const_class_for((size as usize).saturating_add(page::HEADER_BYTES)),
+            js_edges,
         }
     }
 
     /// A runtime type's: `size` bytes (an array's fixed part), no drop
-    /// glue.
+    /// glue. No size class nor JS edge: only a Rust type's allocation
+    /// (`Mutation::alloc`'s fast path) reads them; a runtime type's
+    /// objects, an array's of any length, take their class from their
+    /// size as they are allocated (`raw`).
     const fn raw(size: u32) -> Self {
         Self {
             name: "raw",
@@ -180,6 +197,8 @@ impl TypeInfo {
             kind: Kind::Raw,
             drop: None,
             finalizer: Finalizer::None,
+            class: page::NO_CLASS,
+            js_edges: false,
         }
     }
 
@@ -191,6 +210,8 @@ impl TypeInfo {
             kind: Kind::MemberArray,
             drop: None,
             finalizer: Finalizer::None,
+            class: page::NO_CLASS,
+            js_edges: false,
         }
     }
 
@@ -216,6 +237,16 @@ impl TypeInfo {
 
     pub(crate) fn finalizer(&self) -> Finalizer {
         self.finalizer
+    }
+
+    /// Its objects' size class (`page::class_for` of its size and header),
+    /// `None` for a large one.
+    pub(crate) fn class(&self) -> Option<usize> {
+        (self.class != page::NO_CLASS).then_some(self.class as usize)
+    }
+
+    pub(crate) fn has_js_edges(&self) -> bool {
+        self.js_edges
     }
 }
 

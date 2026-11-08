@@ -550,6 +550,86 @@ fn the_marking_barrier_takes_no_i31() {
     drop(a);
 }
 
+/// A heap snapshot's walk (`Heap::walk`) finds a runtime type's objects,
+/// their sizes (an array's by its length) and their edges to objects, an
+/// array's elements' too, unnamed; an `I31` or an empty edge is none.
+#[test]
+fn a_walk_finds_raw_objects_and_their_edges_to_objects() {
+    let (_range, ty) = types(&[PAIR, EDGES]);
+    let (pair_ty, edges_ty) = (ty[0], ty[1]);
+    for nursery_bytes in [0, 1 << 20] {
+        let mut heap = Heap::new(HeapOptions {
+            nursery_bytes,
+            ..crate::verified()
+        });
+        let root = heap.mutate(|cx| {
+            let leaf = pair(cx, pair_ty, None, None, 2);
+            let inner = pair(cx, pair_ty, Some(leaf), None, 1);
+            let array = raw::alloc_array(cx, edges_ty, 3).unwrap();
+            // SAFETY: the pair's right edge and the array's elements, by
+            // their layouts.
+            unsafe {
+                raw::write_edge(cx, inner, 4, Some(Ref::I31(I31::wrapping_u32(7))));
+                raw::write_edge(cx, array, element_at(0), Some(Ref::Object(inner)));
+                raw::write_edge(
+                    cx,
+                    array,
+                    element_at(1),
+                    Some(Ref::I31(I31::wrapping_u32(9))),
+                );
+            }
+            Persistent::new(cx, array)
+        });
+        heap.walk(|cx, walk| check_walk(cx, walk, root.get(cx), edges_ty, nursery_bytes));
+    }
+}
+
+/// `a_walk_finds_raw_objects_and_their_edges_to_objects`'s checks: the
+/// array, its pair and that one's leaf.
+fn check_walk<'gc>(
+    cx: &Mutation<'gc>,
+    walk: &elise::Walk<'gc>,
+    array: Gc<'gc, Erased>,
+    edges_ty: u32,
+    nursery_bytes: usize,
+) {
+    let inner = left_of_array(cx, array);
+    let leaf = left(cx, inner).unwrap();
+    let found = |object: Gc<'gc, Erased>| {
+        walk.objects()
+            .find(|found| Gc::ptr_eq(found.get(), object))
+            .unwrap_or_else(|| panic!("{nursery_bytes}: not walked"))
+    };
+    // Its edges' objects, each strong and unnamed.
+    let to = |object: Gc<'gc, Erased>| -> Vec<Gc<'gc, Erased>> {
+        found(object)
+            .edges()
+            .map(|edge| {
+                assert!(edge.name.is_none());
+                assert!(matches!(edge.kind, elise::EdgeKind::Strong));
+                edge.to.get()
+            })
+            .collect()
+    };
+    let only = |edges: Vec<Gc<'gc, Erased>>, object: Gc<'gc, Erased>| {
+        edges.len() == 1 && Gc::ptr_eq(edges[0], object)
+    };
+    assert_eq!(found(array).type_index(), edges_ty);
+    assert_eq!(found(array).type_name(), "raw");
+    // Its header, its length's 8 bytes, its three edges, rounded up to 8.
+    assert_eq!(found(array).size(), 8 + 8 + 16, "{nursery_bytes}");
+    assert_eq!(found(inner).size(), 8 + 16, "{nursery_bytes}");
+    assert!(only(to(array), inner), "{nursery_bytes}");
+    assert!(only(to(inner), leaf), "{nursery_bytes}");
+    assert!(to(leaf).is_empty());
+}
+
+/// The object element 0 of an array of `EDGES` holds.
+fn left_of_array<'gc>(cx: &Mutation<'gc>, array: Gc<'gc, Erased>) -> Gc<'gc, Erased> {
+    // SAFETY: the array's element 0, by its layout.
+    object_in(unsafe { raw::read_edge(cx, array, element_at(0)) }).unwrap()
+}
+
 #[test]
 fn a_wrong_layout_is_refused() {
     let range = TypeRange::reserve(1).unwrap();

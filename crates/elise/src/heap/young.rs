@@ -282,7 +282,10 @@ impl Inner {
     }
 
     /// The nursery's next page to bump through, the current one's end
-    /// kept: `None` if the nursery has all its pages.
+    /// kept: `None` if the nursery has all its pages. Out of line, as
+    /// `refill`.
+    #[cold]
+    #[inline(never)]
     fn young_page(&self) -> Option<Cursor> {
         self.close_young_page();
         let mut young = self.young.borrow_mut();
@@ -301,6 +304,7 @@ impl Inner {
             next: start,
             limit: start.saturating_add(PAGE_BYTES),
             page: number,
+            ..Cursor::default()
         })
     }
 
@@ -828,6 +832,7 @@ impl Source<'_> {
                 next: start,
                 limit: start.saturating_add(PAGE_BYTES),
                 page: number,
+                ..Cursor::default()
             };
         }
         let start = self.to.next;
