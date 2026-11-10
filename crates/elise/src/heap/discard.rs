@@ -10,12 +10,16 @@
 
 use crate::cage::Discarder;
 use crate::page::{self, PAGE_BYTES};
-use crate::platform::{Job, JobDelegate};
+use crate::platform::{Job, JobDelegate, Platform, in_worker_span};
 use crate::sync::{self, AtomicUsize, Mutex, Ordering};
 
 /// The pages to discard, and the job that does.
 pub(super) struct Discards {
     discarder: Discarder,
+    /// The heap's platform: a run on a worker is a phase of its trace,
+    /// while it records (`tracing`).
+    platform: std::sync::Arc<dyn Platform>,
+    tracing: &'static std::sync::atomic::AtomicBool,
     queue: Mutex<Queue>,
     /// `queue.todo`'s length, for `max_concurrency`, which mustn't lock.
     left: AtomicUsize,
@@ -32,9 +36,11 @@ struct Queue {
 }
 
 impl Discards {
-    pub(super) fn new(discarder: Discarder) -> Self {
+    pub(super) fn new(discarder: Discarder, platform: std::sync::Arc<dyn Platform>) -> Self {
         Self {
             discarder,
+            tracing: platform.tracing(),
+            platform,
             queue: Mutex::default(),
             left: AtomicUsize::new(0),
             done: AtomicUsize::new(0),
@@ -74,25 +80,33 @@ impl Discards {
 
 impl Job for Discards {
     fn run(&self, delegate: &dyn JobDelegate) {
-        while !delegate.should_yield() {
-            let number = {
-                let mut queue = sync::lock(&self.queue);
-                let Some(number) = queue.todo.pop() else {
-                    return;
-                };
-                self.left.store(queue.todo.len(), Ordering::Relaxed);
-                queue.busy = Some(number);
-                number
-            };
-            // SAFETY: the heap cancels this job before its cage goes; the
-            // page is `Discarding`, so it holds no object, and no thread
-            // takes (and commits) it until a safepoint finds it done.
-            unsafe { self.discarder.discard(page::start_of(number), PAGE_BYTES) };
-            let mut queue = sync::lock(&self.queue);
-            queue.busy = None;
-            queue.done.push(number);
-            self.done.store(queue.done.len(), Ordering::Relaxed);
-        }
+        in_worker_span(
+            self.tracing,
+            &*self.platform,
+            delegate,
+            "Gc.Discard",
+            || {
+                while !delegate.should_yield() {
+                    let number = {
+                        let mut queue = sync::lock(&self.queue);
+                        let Some(number) = queue.todo.pop() else {
+                            return;
+                        };
+                        self.left.store(queue.todo.len(), Ordering::Relaxed);
+                        queue.busy = Some(number);
+                        number
+                    };
+                    // SAFETY: the heap cancels this job before its cage goes; the
+                    // page is `Discarding`, so it holds no object, and no thread
+                    // takes (and commits) it until a safepoint finds it done.
+                    unsafe { self.discarder.discard(page::start_of(number), PAGE_BYTES) };
+                    let mut queue = sync::lock(&self.queue);
+                    queue.busy = None;
+                    queue.done.push(number);
+                    self.done.store(queue.done.len(), Ordering::Relaxed);
+                }
+            },
+        )
     }
 
     fn max_concurrency(&self, _: usize) -> usize {

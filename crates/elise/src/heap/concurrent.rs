@@ -31,7 +31,7 @@ use std::time::Instant;
 use super::{Base, SiteTally};
 use crate::js::{JsEdge, JsEdgeLocal, JsEdgeSink};
 use crate::page::{HEADER_BYTES, MarkTable};
-use crate::platform::{Job, JobDelegate, JobHandle, Platform};
+use crate::platform::{Job, JobDelegate, JobHandle, Platform, in_worker_span};
 use crate::site;
 use crate::sync::{self, AtomicBool, AtomicUsize, Mutex, Ordering};
 use crate::types::{self, Kind};
@@ -66,6 +66,10 @@ pub(crate) struct Marker {
     /// It counts the bytes it scans (`marked_bytes`): a marking a JS engine
     /// drives, which tells the engine the heap's live bytes as it ends.
     counts_bytes: bool,
+    /// The heap's platform: a run on a worker is a phase of its trace,
+    /// while it records (`tracing`).
+    platform: Arc<dyn Platform>,
+    tracing: &'static std::sync::atomic::AtomicBool,
     /// The bytes of the objects scanned (their slots'), in a marking that
     /// counts them; with the black allocated, the live old generation.
     pub(super) marked_bytes: AtomicUsize,
@@ -111,9 +115,12 @@ impl Marker {
         sites: usize,
         js: Option<Arc<dyn JsEdgeSink>>,
         verifies: bool,
+        platform: Arc<dyn Platform>,
     ) -> Self {
         let counts_bytes = js.is_some();
         Self {
+            tracing: platform.tracing(),
+            platform,
             base,
             marks,
             young_pages,
@@ -520,96 +527,119 @@ unsafe fn load_edge(at: *const u8) -> u32 {
 
 impl Job for Marker {
     fn run(&self, delegate: &dyn JobDelegate) {
-        let joining = delegate.is_joining_thread();
-        let mut scanned = 0usize;
-        // A background run counts its objects every `PROGRESS` as it goes,
-        // for a driven marking's schedule; the others, at the end.
-        let mut background = false;
-        let mut tally = SiteTally {
-            counts: vec![0; self.sites],
-            site: 0,
-            run: 0,
-            bytes: 0,
-        };
-        // Each scan's finds; a background run hands its discovered
-        // ephemerons over between its turns on the worklist.
-        let found = std::cell::RefCell::new(Found::default());
-        let published = &|| delegate.notify_concurrency_increase();
-        if (joining || self.joined.load(Ordering::Relaxed)) && self.concurrent {
-            self.worklist.run(joining, published, |data, local, _| {
-                // SAFETY: an item is a marked old object, so a live one.
-                unsafe {
-                    self.scan::<true, false>(data, local, &mut tally, &mut found.borrow_mut())
+        in_worker_span(
+            self.tracing,
+            &*self.platform,
+            delegate,
+            "Gc.ConcurrentMark",
+            || {
+                let joining = delegate.is_joining_thread();
+                let mut scanned = 0usize;
+                // A background run counts its objects every `PROGRESS` as it goes,
+                // for a driven marking's schedule; the others, at the end.
+                let mut background = false;
+                let mut tally = SiteTally {
+                    counts: vec![0; self.sites],
+                    site: 0,
+                    run: 0,
+                    bytes: 0,
                 };
-                scanned = scanned.saturating_add(1);
-            });
-        } else if joining || self.joined.load(Ordering::Relaxed) {
-            self.worklist.run(joining, published, |data, local, _| {
-                // SAFETY: as above.
-                unsafe {
-                    self.scan::<false, false>(data, local, &mut tally, &mut found.borrow_mut())
-                };
-                scanned = scanned.saturating_add(1);
-            });
-        } else {
-            background = true;
-            let mut visit = |data: usize, local: &mut Local, _: &Worklist| {
-                // SAFETY: as above.
-                unsafe {
-                    self.scan::<true, true>(data, local, &mut tally, &mut found.borrow_mut())
-                };
-                scanned = scanned.saturating_add(1);
-                if scanned.is_multiple_of(PROGRESS) {
-                    self.count_scanned(PROGRESS, true);
+                // Each scan's finds; a background run hands its discovered
+                // ephemerons over between its turns on the worklist.
+                let found = std::cell::RefCell::new(Found::default());
+                let published = &|| delegate.notify_concurrency_increase();
+                if (joining || self.joined.load(Ordering::Relaxed)) && self.concurrent {
+                    self.worklist.run(joining, published, |data, local, _| {
+                        // SAFETY: an item is a marked old object, so a live one.
+                        unsafe {
+                            self.scan::<true, false>(
+                                data,
+                                local,
+                                &mut tally,
+                                &mut found.borrow_mut(),
+                            )
+                        };
+                        scanned = scanned.saturating_add(1);
+                    });
+                } else if joining || self.joined.load(Ordering::Relaxed) {
+                    self.worklist.run(joining, published, |data, local, _| {
+                        // SAFETY: as above.
+                        unsafe {
+                            self.scan::<false, false>(
+                                data,
+                                local,
+                                &mut tally,
+                                &mut found.borrow_mut(),
+                            )
+                        };
+                        scanned = scanned.saturating_add(1);
+                    });
+                } else {
+                    background = true;
+                    let mut visit = |data: usize, local: &mut Local, _: &Worklist| {
+                        // SAFETY: as above.
+                        unsafe {
+                            self.scan::<true, true>(
+                                data,
+                                local,
+                                &mut tally,
+                                &mut found.borrow_mut(),
+                            )
+                        };
+                        scanned = scanned.saturating_add(1);
+                        if scanned.is_multiple_of(PROGRESS) {
+                            self.count_scanned(PROGRESS, true);
+                        }
+                    };
+                    #[expect(
+                        clippy::disallowed_methods,
+                        reason = "a count of the runs in progress, at most the workers"
+                    )]
+                    self.active.fetch_add(1, Ordering::SeqCst);
+                    let started = std::time::Instant::now();
+                    // Out of segments (not asked to yield): the discovered
+                    // ephemerons whose key got marked give more to mark.
+                    while self.worklist.run_background(
+                        &|| delegate.should_yield(),
+                        &|| delegate.notify_concurrency_increase(),
+                        &mut visit,
+                    ) {
+                        sync::lock(&self.discovered).append(&mut found.borrow_mut().discovered);
+                        let mut local = Local::new();
+                        if !self.resolve(|value| local.push(&self.worklist, value)) {
+                            break;
+                        }
+                        self.worklist.flush(&mut local);
+                    }
+                    let ns = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+                    #[expect(
+                        clippy::disallowed_methods,
+                        reason = "statistics: it would take 585 years of runs to wrap"
+                    )]
+                    self.background_ns
+                        .fetch_add(ns, std::sync::atomic::Ordering::Relaxed);
+                    self.active.fetch_sub(1, Ordering::SeqCst);
                 }
-            };
-            #[expect(
-                clippy::disallowed_methods,
-                reason = "a count of the runs in progress, at most the workers"
-            )]
-            self.active.fetch_add(1, Ordering::SeqCst);
-            let started = std::time::Instant::now();
-            // Out of segments (not asked to yield): the discovered
-            // ephemerons whose key got marked give more to mark.
-            while self.worklist.run_background(
-                &|| delegate.should_yield(),
-                &|| delegate.notify_concurrency_increase(),
-                &mut visit,
-            ) {
-                sync::lock(&self.discovered).append(&mut found.borrow_mut().discovered);
-                let mut local = Local::new();
-                if !self.resolve(|value| local.push(&self.worklist, value)) {
-                    break;
+                tally.flush();
+                self.add_marked_bytes(tally.bytes);
+                let mut found = found.into_inner();
+                if !found.weak.is_empty() {
+                    sync::lock(&self.weak_slots).append(&mut found.weak);
                 }
-                self.worklist.flush(&mut local);
-            }
-            let ns = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
-            #[expect(
-                clippy::disallowed_methods,
-                reason = "statistics: it would take 585 years of runs to wrap"
-            )]
-            self.background_ns
-                .fetch_add(ns, std::sync::atomic::Ordering::Relaxed);
-            self.active.fetch_sub(1, Ordering::SeqCst);
-        }
-        tally.flush();
-        self.add_marked_bytes(tally.bytes);
-        let mut found = found.into_inner();
-        if !found.weak.is_empty() {
-            sync::lock(&self.weak_slots).append(&mut found.weak);
-        }
-        if !found.discovered.is_empty() {
-            sync::lock(&self.discovered).append(&mut found.discovered);
-        }
-        if self.sites > 0 {
-            site::add_counts(&mut sync::lock(&self.site_marked), &tally.counts);
-        }
-        let left = if background {
-            scanned % PROGRESS
-        } else {
-            scanned
-        };
-        self.count_scanned(left, !joining);
+                if !found.discovered.is_empty() {
+                    sync::lock(&self.discovered).append(&mut found.discovered);
+                }
+                if self.sites > 0 {
+                    site::add_counts(&mut sync::lock(&self.site_marked), &tally.counts);
+                }
+                let left = if background {
+                    scanned % PROGRESS
+                } else {
+                    scanned
+                };
+                self.count_scanned(left, !joining);
+            },
+        )
     }
 
     fn max_concurrency(&self, active: usize) -> usize {

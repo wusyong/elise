@@ -30,7 +30,7 @@ use crate::asan;
 use crate::cage::{self, Cage};
 use crate::page::{self, HEADER_BYTES, LargeObject, MarkTable, PAGE_BYTES, PAGES, Page, SlotSet};
 use crate::persistent::RootTable;
-use crate::platform::{self, JobHandle, Platform};
+use crate::platform::{self, JobHandle, Phase, Platform};
 use crate::site::{self, Site, SiteStats, Sites};
 use crate::sync::{self, Ordering};
 use crate::types::{self, Finalizer, MAX_OBJECT_BYTES, TypeInfo};
@@ -383,6 +383,8 @@ pub(crate) struct Inner {
     overshoot: Cell<usize>,
     options: HeapOptions,
     platform: std::sync::Arc<dyn Platform>,
+    /// The platform's flag of whether its trace records (`Platform::tracing`).
+    tracing: &'static std::sync::atomic::AtomicBool,
     gcs: Cell<u64>,
     last_gc: Cell<GcRecord>,
     scavenges: Cell<u64>,
@@ -518,10 +520,14 @@ impl Heap {
     /// A heap whose GCs mark on `platform`'s workers.
     pub fn with_platform(options: HeapOptions, platform: std::sync::Arc<dyn Platform>) -> Self {
         let cage = Cage::new();
-        let discards = std::sync::Arc::new(discard::Discards::new(cage.discarder()));
+        let discards =
+            std::sync::Arc::new(discard::Discards::new(cage.discarder(), platform.clone()));
         let mark_table = std::sync::Arc::new(MarkTable::new());
-        let sweeper =
-            std::sync::Arc::new(sweep::Sweeper::new(mark_table.clone(), Base(cage.base())));
+        let sweeper = std::sync::Arc::new(sweep::Sweeper::new(
+            mark_table.clone(),
+            Base(cage.base()),
+            platform.clone(),
+        ));
         let young_pages: std::sync::Arc<[std::sync::atomic::AtomicBool; PAGES]> =
             std::sync::Arc::new(std::array::from_fn(|_| {
                 std::sync::atomic::AtomicBool::new(false)
@@ -582,6 +588,7 @@ impl Heap {
                 limit: Cell::new(options.min_allocation_bytes),
                 overshoot: Cell::new(0),
                 options,
+                tracing: platform.tracing(),
                 platform,
                 gcs: Cell::new(0),
                 last_gc: Cell::new(GcRecord::default()),
@@ -1015,6 +1022,7 @@ impl Heap {
         );
         inner.drain_barrier();
         let platform = inner.platform.clone();
+        let tracing = inner.tracing;
         let used = inner.used_now().saturating_add(inner.young_used.get());
         let marking = inner.marking.get_mut().as_mut().expect("a marking runs");
         let marker = marking.marker.clone();
@@ -1022,14 +1030,15 @@ impl Heap {
         let marked = marker.scanned.load(Ordering::Relaxed);
         // In the engine's trace, inside its step or pause (V8's
         // `MC_INCREMENTAL_EMBEDDER_TRACING`, `MC_MARK_EMBEDDER_TRACING`).
+        let step;
         if atomic {
-            platform.trace_begin("Gc.Mark");
+            step = Phase::begin(tracing, &*platform, "Gc.Mark");
             driven.before_pause.get_or_insert(marked);
             marking.cancel();
             marker.worklist.reseed(Vec::new());
             marker.finish(&*platform);
         } else {
-            platform.trace_begin("Gc.Step");
+            step = Phase::begin(tracing, &*platform, "Gc.Step");
             let limit = driven.schedule.step(driven.started.elapsed(), used, marked);
             if limit > 0 {
                 let scanned = marker.step(limit, started.checked_add(budget));
@@ -1037,7 +1046,7 @@ impl Heap {
             }
             marking.notify();
         }
-        platform.trace_end();
+        step.end();
         inner.marking_done()
     }
 
@@ -2034,7 +2043,7 @@ impl Inner {
         debug_assert!(self.marking.get_mut().is_none(), "a marking runs");
         let platform = self.platform.clone();
         let started = Instant::now();
-        platform.trace_begin("Gc.Pause");
+        let phase_pause = Phase::begin(self.tracing, &*platform, "Gc.Pause");
         self.finish_sweeping(&*platform);
         self.record.gc_started();
         // A nursery whose scavenges since the last full GC kept next to
@@ -2044,13 +2053,13 @@ impl Inner {
         // live object, and the mark-sweep never sees a young page.
         self.scavenge(&*platform, true);
         let phase = Instant::now();
-        platform.trace_begin("Gc.Mark");
+        let phase_mark = Phase::begin(self.tracing, &*platform, "Gc.Mark");
         let marking = self.begin_marking(false, None);
         let (mut record, before, floating) = self.end_marking(&*platform, marking);
-        platform.trace_end();
+        phase_mark.end();
         record.mark_ns = elapsed_ns(phase);
         self.sweep_phases(&*platform, &mut record, before, atomic);
-        platform.trace_end();
+        phase_pause.end();
         record.pause_ns = elapsed_ns(started);
         self.gc_done(record, floating.as_ref());
     }
@@ -2067,19 +2076,19 @@ impl Inner {
     fn start_marking_with(&mut self, js: Option<std::sync::Arc<dyn crate::JsEdgeSink>>) {
         let platform = self.platform.clone();
         let started = Instant::now();
-        platform.trace_begin("Gc.Pause");
+        let phase_pause = Phase::begin(self.tracing, &*platform, "Gc.Pause");
         self.finish_sweeping(&*platform);
         self.record.gc_started();
         self.young.get_mut().resize_at_full_gc();
         self.scavenge(&*platform, true);
         // After the sweep (the limit) and the scavenge (what it promoted).
         self.overshoot.set(self.overshoot_margin());
-        platform.trace_begin("Gc.MarkStart");
+        let phase_markstart = Phase::begin(self.tracing, &*platform, "Gc.MarkStart");
         let mut marking = self.begin_marking(true, js);
-        platform.trace_end();
+        phase_markstart.end();
         marking.post(&*platform);
         *self.marking.get_mut() = Some(marking);
-        platform.trace_end();
+        phase_pause.end();
         let ns = elapsed_ns(started);
         self.start_pause_ns.set(ns);
         self.gc_ns.set(self.gc_ns.get().saturating_add(ns));
@@ -2090,19 +2099,19 @@ impl Inner {
     fn finish_marking(&mut self) {
         let platform = self.platform.clone();
         let started = Instant::now();
-        platform.trace_begin("Gc.Pause");
+        let phase_pause = Phase::begin(self.tracing, &*platform, "Gc.Pause");
         let phase = Instant::now();
-        platform.trace_begin("Gc.Mark");
+        let phase_mark = Phase::begin(self.tracing, &*platform, "Gc.Mark");
         let marking = self.marking.get_mut().take().expect("a marking runs");
         let (mut record, before, floating) = self.end_marking(&*platform, marking);
-        platform.trace_end();
+        phase_mark.end();
         record.mark_ns = elapsed_ns(phase);
         record.concurrent = true;
         record.start_pause_ns = self.start_pause_ns.get();
         self.concurrent_markings
             .set(self.concurrent_markings.get().saturating_add(1));
         self.sweep_phases(&*platform, &mut record, before, false);
-        platform.trace_end();
+        phase_pause.end();
         record.pause_ns = elapsed_ns(started);
         self.gc_done(record, floating.as_ref());
     }
@@ -2203,6 +2212,7 @@ impl Inner {
             self.sites.get_mut().len(),
             js,
             verifies,
+            self.platform.clone(),
         );
         concurrent::Marking::new(std::sync::Arc::new(marker), before, floating)
     }
@@ -2233,9 +2243,9 @@ impl Inner {
         marking.marker.finish(platform);
         let weak = std::mem::take(&mut *sync::lock(&marking.marker.weak_slots));
         let pairs = std::mem::take(&mut *sync::lock(&marking.marker.discovered));
-        platform.trace_begin("Gc.Weak");
+        let phase_weak = Phase::begin(self.tracing, platform, "Gc.Weak");
         self.clear_weak(weak, pairs);
-        platform.trace_end();
+        phase_weak.end();
         self.blacken_cursors(false);
         self.marking_active.set(false);
         self.barrier_state.set_marking(false);
@@ -2426,7 +2436,7 @@ impl Inner {
     ) {
         let gc = self.gcs.get().saturating_add(1);
         let phase = Instant::now();
-        platform.trace_begin("Gc.Sweep");
+        let phase_sweep = Phase::begin(self.tracing, platform, "Gc.Sweep");
         // The pages are handed out by their counts of objects with drop
         // glue: the cursors' first.
         {
@@ -2547,15 +2557,15 @@ impl Inner {
         } else {
             *self.sweep_job.get_mut() = platform.post_job(self.sweeper.clone());
         }
-        platform.trace_end();
+        phase_sweep.end();
         record.sweep_ns = elapsed_ns(phase);
         if atomic {
             let phase = Instant::now();
-            platform.trace_begin("Gc.Finalize");
+            let phase_finalize = Phase::begin(self.tracing, platform, "Gc.Finalize");
             self.sweep_main_pages();
             self.sweep_done();
             record.marked_bytes = self.last_live.get();
-            platform.trace_end();
+            phase_finalize.end();
             record.finalize_ns = elapsed_ns(phase);
         }
     }
@@ -2567,7 +2577,7 @@ impl Inner {
         if !self.sweeping.get() {
             return;
         }
-        platform.trace_begin("Gc.Sweep");
+        let phase_sweep = Phase::begin(self.tracing, platform, "Gc.Sweep");
         if let Some(job) = self.sweep_job.get_mut().take() {
             job.cancel();
         }
@@ -2575,7 +2585,7 @@ impl Inner {
         self.apply_swept(&mut self.space.borrow_mut());
         self.sweep_main_pages();
         self.sweep_done();
-        platform.trace_end();
+        phase_sweep.end();
     }
 
     /// At a safepoint while the sweep runs: the results so far applied, the

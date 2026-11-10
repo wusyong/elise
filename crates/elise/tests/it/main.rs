@@ -55,6 +55,10 @@ mod young;
 /// Options that check the heap after every GC: every test runs the heap
 /// verifier, but under Miri (too slow there; it looks for undefined
 /// behavior, the verifier's checks run in `cargo test`).
+/// The flag of a test's platform whose trace always records
+/// (`Platform::tracing`).
+pub static TRACING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
 pub fn verified() -> elise::HeapOptions {
     elise::HeapOptions {
         verify: !cfg!(miri),

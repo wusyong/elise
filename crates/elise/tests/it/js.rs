@@ -865,6 +865,10 @@ fn the_engines_steps_and_pause_are_in_the_trace() {
             InlinePlatform.run(job);
         }
 
+        fn tracing(&self) -> &'static std::sync::atomic::AtomicBool {
+            &crate::TRACING
+        }
+
         fn trace_begin(&self, name: &'static str) {
             self.0.lock().unwrap().push(format!("begin {name}"));
         }

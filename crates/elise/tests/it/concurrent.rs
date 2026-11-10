@@ -21,11 +21,14 @@ use elise::{
 };
 
 /// A platform whose posted jobs (a marking's, the discarding of pages)
-/// run only in `step`.
+/// run only in `step`; it keeps the trace events it is sent.
 #[derive(Default)]
 pub(crate) struct Stepping {
     /// By the number each was posted with.
     posted: Mutex<Vec<(usize, Arc<dyn Job + Send>)>>,
+    /// The trace's events, `begin <name>` and `end`, and when each was.
+    pub(crate) traced: Mutex<Vec<String>>,
+    pub(crate) traced_at: Mutex<Vec<std::time::Instant>>,
     next: Mutex<usize>,
     /// The times the heap told a posted job's handle there is more to do.
     notified: AtomicUsize,
@@ -117,6 +120,28 @@ impl Platform for Steps {
 
     fn posts_jobs(&self) -> bool {
         true
+    }
+
+    fn tracing(&self) -> &'static std::sync::atomic::AtomicBool {
+        &crate::TRACING
+    }
+
+    fn trace_begin(&self, name: &'static str) {
+        self.0.traced.lock().unwrap().push(format!("begin {name}"));
+        self.0
+            .traced_at
+            .lock()
+            .unwrap()
+            .push(std::time::Instant::now());
+    }
+
+    fn trace_end(&self) {
+        self.0.traced.lock().unwrap().push("end".to_owned());
+        self.0
+            .traced_at
+            .lock()
+            .unwrap()
+            .push(std::time::Instant::now());
     }
 }
 
@@ -378,7 +403,19 @@ fn a_marking_finishes_at_the_safepoint_after_it_is_done() {
     let a = old_pair(&mut heap);
     start_marking(&mut heap);
     assert!(!heap.should_collect() || heap.stats().young_bytes > 0);
+    steps.traced.lock().unwrap().clear();
+    steps.traced_at.lock().unwrap().clear();
     steps.step();
+    // The worker's run is a span of the trace, which holds the time it
+    // counts (`background_mark_ns`, below).
+    assert_eq!(
+        *steps.traced.lock().unwrap(),
+        ["begin Gc.ConcurrentMark", "end"]
+    );
+    let span = {
+        let at = steps.traced_at.lock().unwrap();
+        u64::try_from(at[1].duration_since(at[0]).as_nanos()).unwrap()
+    };
     assert!(heap.should_collect(), "done: the next safepoint finishes");
     heap.mutate(|_| {});
     assert!(!heap.is_marking());
@@ -395,6 +432,7 @@ fn a_marking_finishes_at_the_safepoint_after_it_is_done() {
         heap.stats().background_mark_ns > 0,
         "the job's run is timed"
     );
+    assert!(span >= heap.stats().background_mark_ns, "{span} ns");
     drop(a);
 }
 

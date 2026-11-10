@@ -26,13 +26,17 @@
 
 use super::{Base, POISON};
 use crate::page::{HEADER_BYTES, MarkTable, Swept};
-use crate::platform::{Job, JobDelegate};
+use crate::platform::{Job, JobDelegate, Platform, in_worker_span};
 use crate::sync::{self, AtomicUsize, Mutex, Ordering};
 use crate::types;
 
 pub(super) struct Sweeper {
     marks: std::sync::Arc<MarkTable>,
     base: Base,
+    /// The heap's platform: a run on a worker is a phase of its trace,
+    /// while it records (`tracing`).
+    platform: std::sync::Arc<dyn Platform>,
+    tracing: &'static std::sync::atomic::AtomicBool,
     state: Mutex<State>,
     /// The pages and large objects not taken yet, for `max_concurrency`,
     /// which mustn't lock.
@@ -93,10 +97,16 @@ struct State {
 }
 
 impl Sweeper {
-    pub(super) fn new(marks: std::sync::Arc<MarkTable>, base: Base) -> Self {
+    pub(super) fn new(
+        marks: std::sync::Arc<MarkTable>,
+        base: Base,
+        platform: std::sync::Arc<dyn Platform>,
+    ) -> Self {
         Self {
             marks,
             base,
+            tracing: platform.tracing(),
+            platform,
             state: Mutex::new(State {
                 handed: Handed::new(0),
                 busy: Vec::new(),
@@ -264,39 +274,47 @@ impl Drop for Taken<'_> {
 
 impl Job for Sweeper {
     fn run(&self, delegate: &dyn JobDelegate) {
-        let joining = delegate.is_joining_thread();
-        let started = std::time::Instant::now();
-        while joining || !delegate.should_yield() {
-            let Some(item) = self.take() else {
-                break;
-            };
-            let taken = Taken {
-                sweeper: self,
-                item,
-            };
-            let swept = self.sweep(item);
-            std::mem::forget(taken);
-            let mut state = sync::lock(&self.state);
-            state.busy.retain(|&busy| busy != item);
-            match (item, swept) {
-                (Item::Page(number, _), Some(swept)) => state.swept.push((number, swept)),
-                (Item::Large(number), _) => state.freed.push(number),
-                (Item::Page(..), None) => unreachable!("a page's sweep has a result"),
-            }
-            self.swept.store(
-                state.swept.len().saturating_add(state.freed.len()),
-                Ordering::Relaxed,
-            );
-        }
-        if !joining {
-            let ns = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
-            #[expect(
-                clippy::disallowed_methods,
-                reason = "statistics: it would take 585 years of runs to wrap"
-            )]
-            self.background_ns
-                .fetch_add(ns, std::sync::atomic::Ordering::Relaxed);
-        }
+        in_worker_span(
+            self.tracing,
+            &*self.platform,
+            delegate,
+            "Gc.ConcurrentSweep",
+            || {
+                let joining = delegate.is_joining_thread();
+                let started = std::time::Instant::now();
+                while joining || !delegate.should_yield() {
+                    let Some(item) = self.take() else {
+                        break;
+                    };
+                    let taken = Taken {
+                        sweeper: self,
+                        item,
+                    };
+                    let swept = self.sweep(item);
+                    std::mem::forget(taken);
+                    let mut state = sync::lock(&self.state);
+                    state.busy.retain(|&busy| busy != item);
+                    match (item, swept) {
+                        (Item::Page(number, _), Some(swept)) => state.swept.push((number, swept)),
+                        (Item::Large(number), _) => state.freed.push(number),
+                        (Item::Page(..), None) => unreachable!("a page's sweep has a result"),
+                    }
+                    self.swept.store(
+                        state.swept.len().saturating_add(state.freed.len()),
+                        Ordering::Relaxed,
+                    );
+                }
+                if !joining {
+                    let ns = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+                    #[expect(
+                        clippy::disallowed_methods,
+                        reason = "statistics: it would take 585 years of runs to wrap"
+                    )]
+                    self.background_ns
+                        .fetch_add(ns, std::sync::atomic::Ordering::Relaxed);
+                }
+            },
+        )
     }
 
     fn max_concurrency(&self, _: usize) -> usize {

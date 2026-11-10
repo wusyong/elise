@@ -558,9 +558,10 @@ fn empty_pages_are_pooled_then_discarded() {
 }
 
 /// Where the platform has workers, a page a whole GC in the pool goes to
-/// one, which gives its memory back: until the safepoint after it did, the
-/// page still holds memory and the heap takes a new one instead; then it
-/// is discarded, and taken (committed anew) before a new one.
+/// one, which gives its memory back (its run a span of the trace): until
+/// the safepoint after it did, the page still holds memory and the heap
+/// takes a new one instead; then it is discarded, and taken (committed
+/// anew) before a new one.
 #[test]
 fn a_worker_discards_the_pooled_pages() {
     let (mut heap, steps) = crate::concurrent::stepping_heap(0);
@@ -587,7 +588,10 @@ fn a_worker_discards_the_pooled_pages() {
         Persistent::new(cx, object)
     });
     assert_eq!(heap.stats().committed_bytes, 2 * PAGE_BYTES);
+    steps.traced.lock().unwrap().clear();
     steps.step();
+    // The worker's run is a span of the trace.
+    assert_eq!(*steps.traced.lock().unwrap(), ["begin Gc.Discard", "end"]);
     assert!(!steps.posted());
     assert_eq!(
         heap.stats().committed_bytes,
@@ -710,6 +714,10 @@ struct Traced(std::sync::Mutex<Vec<String>>);
 impl elise::Platform for Traced {
     fn run(&self, job: &dyn elise::Job) {
         elise::InlinePlatform.run(job);
+    }
+
+    fn tracing(&self) -> &'static std::sync::atomic::AtomicBool {
+        &crate::TRACING
     }
 
     fn trace_begin(&self, name: &'static str) {
@@ -946,4 +954,84 @@ fn fields_may_have_any_name() {
         assert_eq!(named.init.get(), 3);
         assert_eq!(named.slot.get(cx).map(|small| small.value.get()), Some(7));
     });
+}
+
+/// A platform that takes the trace's events while its flag says it records.
+struct Flagged {
+    on: &'static std::sync::atomic::AtomicBool,
+    events: std::sync::Mutex<Vec<String>>,
+    /// The flag is cleared as this phase begins, set as it ends.
+    flips_in: Option<&'static str>,
+}
+
+impl elise::Platform for Flagged {
+    fn run(&self, job: &dyn elise::Job) {
+        elise::InlinePlatform.run(job);
+    }
+
+    fn tracing(&self) -> &'static std::sync::atomic::AtomicBool {
+        self.on
+    }
+
+    fn trace_begin(&self, name: &'static str) {
+        self.events.lock().unwrap().push(format!("begin {name}"));
+        if self.flips_in == Some(name) {
+            self.on.store(false, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    fn trace_end(&self) {
+        self.events.lock().unwrap().push("end".to_owned());
+    }
+}
+
+/// A platform whose trace doesn't record isn't told of the GC's phases:
+/// the heap reads its flag, and calls it only while that is set.
+#[test]
+fn a_trace_that_doesnt_record_isnt_told_of_phases() {
+    static OFF: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    let platform = std::sync::Arc::new(Flagged {
+        on: &OFF,
+        events: Default::default(),
+        flips_in: None,
+    });
+    let mut heap = Heap::with_platform(crate::verified(), platform.clone());
+    heap.mutate(|cx| {
+        cx.alloc(SmallInit {
+            value: Cell::new(1),
+        });
+    });
+    heap.collect();
+    assert!(platform.events.lock().unwrap().is_empty());
+    // It records from now on: the next GC's phases are told.
+    OFF.store(true, std::sync::atomic::Ordering::Relaxed);
+    heap.collect();
+    let events = platform.events.lock().unwrap();
+    assert_eq!(events[0], "begin Gc.Pause");
+    assert_eq!(events.last().unwrap(), "end");
+}
+
+/// A trace that stops recording inside a phase: the phases begun are
+/// ended, those after it aren't begun, so begins and ends pair.
+#[test]
+fn a_trace_that_stops_in_a_phase_has_its_phases_ended() {
+    static ON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+    let platform = std::sync::Arc::new(Flagged {
+        on: &ON,
+        events: Default::default(),
+        flips_in: Some("Gc.Mark"),
+    });
+    let mut heap = Heap::with_platform(crate::verified(), platform.clone());
+    heap.collect();
+    assert_eq!(
+        *platform.events.lock().unwrap(),
+        [
+            "begin Gc.Pause",
+            "begin Gc.Scavenge",
+            "end",
+            "begin Gc.Mark",
+            "end",
+            "end",
+        ]
+    );
 }
