@@ -26,17 +26,15 @@
 
 use super::{Base, POISON};
 use crate::page::{HEADER_BYTES, MarkTable, Swept};
-use crate::platform::{Job, JobDelegate, Platform, in_worker_span};
+use crate::platform::{Job, JobDelegate, Tracer};
 use crate::sync::{self, AtomicUsize, Mutex, Ordering};
 use crate::types;
 
 pub(super) struct Sweeper {
     marks: std::sync::Arc<MarkTable>,
     base: Base,
-    /// The heap's platform: a run on a worker is a phase of its trace,
-    /// while it records (`tracing`).
-    platform: std::sync::Arc<dyn Platform>,
-    tracing: &'static std::sync::atomic::AtomicBool,
+    /// The heap's trace: a run on a worker is a phase of it.
+    tracer: Tracer,
     state: Mutex<State>,
     /// The pages and large objects not taken yet, for `max_concurrency`,
     /// which mustn't lock.
@@ -97,16 +95,11 @@ struct State {
 }
 
 impl Sweeper {
-    pub(super) fn new(
-        marks: std::sync::Arc<MarkTable>,
-        base: Base,
-        platform: std::sync::Arc<dyn Platform>,
-    ) -> Self {
+    pub(super) fn new(marks: std::sync::Arc<MarkTable>, base: Base, tracer: Tracer) -> Self {
         Self {
             marks,
             base,
-            tracing: platform.tracing(),
-            platform,
+            tracer,
             state: Mutex::new(State {
                 handed: Handed::new(0),
                 busy: Vec::new(),
@@ -274,12 +267,8 @@ impl Drop for Taken<'_> {
 
 impl Job for Sweeper {
     fn run(&self, delegate: &dyn JobDelegate) {
-        in_worker_span(
-            self.tracing,
-            &*self.platform,
-            delegate,
-            "Gc.ConcurrentSweep",
-            || {
+        self.tracer
+            .in_worker_span(delegate, "Gc.ConcurrentSweep", || {
                 let joining = delegate.is_joining_thread();
                 let started = std::time::Instant::now();
                 while joining || !delegate.should_yield() {
@@ -313,8 +302,7 @@ impl Job for Sweeper {
                     self.background_ns
                         .fetch_add(ns, std::sync::atomic::Ordering::Relaxed);
                 }
-            },
-        )
+            })
     }
 
     fn max_concurrency(&self, _: usize) -> usize {

@@ -4,12 +4,12 @@
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::thread::ThreadId;
 
 use elise::{
-    Gc, GcObject, Heap, HeapVector, InlinePlatform, Job, JobHandle, LocalExternal, Member,
-    Mutation, Persistent, Platform, ThreadPool,
+    Gc, GcObject, Heap, HeapVector, InlinePlatform, LocalExternal, Member, Mutation, Persistent,
+    Platform, ThreadPool,
 };
 
 type Log = Rc<RefCell<Vec<u32>>>;
@@ -157,46 +157,6 @@ fn a_narrow_graph_stays_on_the_heaps_thread() {
     });
 }
 
-/// A pool that keeps the trace events it is sent, by the thread that sent
-/// them.
-struct TracedPool {
-    pool: ThreadPool,
-    /// Whether its trace records.
-    on: &'static std::sync::atomic::AtomicBool,
-    events: Mutex<Vec<(ThreadId, String)>>,
-}
-
-impl Platform for TracedPool {
-    fn run(&self, job: &dyn Job) {
-        self.pool.run(job);
-    }
-
-    fn post_job(&self, job: Arc<dyn Job + Send>) -> Option<Box<dyn JobHandle>> {
-        self.pool.post_job(job)
-    }
-
-    fn posts_jobs(&self) -> bool {
-        self.pool.posts_jobs()
-    }
-
-    fn tracing(&self) -> &'static std::sync::atomic::AtomicBool {
-        self.on
-    }
-
-    fn trace_begin(&self, name: &'static str) {
-        let thread = std::thread::current().id();
-        self.events
-            .lock()
-            .unwrap()
-            .push((thread, format!("begin {name}")));
-    }
-
-    fn trace_end(&self) {
-        let thread = std::thread::current().id();
-        self.events.lock().unwrap().push((thread, "end".to_owned()));
-    }
-}
-
 /// The spans of a worker's runs, as cppgc's concurrent ones (a worker
 /// discards pages only a GC after they are freed: `heap`'s
 /// `a_worker_discards_the_pooled_pages` looks for `Gc.Discard`).
@@ -215,11 +175,8 @@ const WORKER_SPANS: [&str; 4] = [
 /// count on).
 #[test]
 fn a_workers_runs_are_spans_of_the_trace() {
-    let platform = Arc::new(TracedPool {
-        pool: ThreadPool::new(3),
-        on: &crate::TRACING,
-        events: Mutex::new(Vec::new()),
-    });
+    static TRACE: crate::Recorder = crate::Recorder::new(true);
+    let platform = crate::with_trace(Arc::new(ThreadPool::new(3)), &TRACE);
     let main = std::thread::current().id();
     let (mut marked, mut scavenged) = (false, false);
     let mut swept = 0;
@@ -237,7 +194,7 @@ fn a_workers_runs_are_spans_of_the_trace() {
         }
     }
     assert!(marked || cfg!(miri), "no worker marked in five GCs");
-    let events = platform.events.lock().unwrap();
+    let events = TRACE.by_thread();
     let mut open: std::collections::HashMap<ThreadId, Vec<&str>> = Default::default();
     let mut found = std::collections::HashSet::new();
     for (thread, event) in events.iter() {
@@ -272,12 +229,8 @@ fn a_workers_runs_are_spans_of_the_trace() {
 /// A pool whose trace doesn't record isn't told of its workers' runs.
 #[test]
 fn a_trace_that_doesnt_record_isnt_told_of_workers_runs() {
-    static OFF: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-    let platform = Arc::new(TracedPool {
-        pool: ThreadPool::new(3),
-        on: &OFF,
-        events: Mutex::new(Vec::new()),
-    });
+    static TRACE: crate::Recorder = crate::Recorder::new(false);
+    let platform = crate::with_trace(Arc::new(ThreadPool::new(3)), &TRACE);
     let mut by_workers = 0;
     for _ in 0..5 {
         let log = Log::default();
@@ -290,5 +243,5 @@ fn a_trace_that_doesnt_record_isnt_told_of_workers_runs() {
         }
     }
     assert!(by_workers > 0 || cfg!(miri), "no worker marked in five GCs");
-    assert!(platform.events.lock().unwrap().is_empty());
+    assert!(TRACE.names().is_empty());
 }

@@ -857,43 +857,22 @@ fn a_step_that_runs_out_as_it_drains_still_marks_the_ephemerons_values() {
 /// inside the engine's own events, they tell the heap's share of them.
 #[test]
 fn the_engines_steps_and_pause_are_in_the_trace() {
-    #[derive(Default)]
-    struct Traced(Mutex<Vec<String>>);
-
-    impl elise::Platform for Traced {
-        fn run(&self, job: &dyn elise::Job) {
-            InlinePlatform.run(job);
-        }
-
-        fn tracing(&self) -> &'static std::sync::atomic::AtomicBool {
-            &crate::TRACING
-        }
-
-        fn trace_begin(&self, name: &'static str) {
-            self.0.lock().unwrap().push(format!("begin {name}"));
-        }
-
-        fn trace_end(&self) {
-            self.0.lock().unwrap().push("end".to_owned());
-        }
-    }
-
-    let platform = Arc::new(Traced::default());
+    static TRACE: crate::Recorder = crate::Recorder::new(true);
     let mut heap = Heap::with_platform(
         HeapOptions {
             driven: true,
             nursery_bytes: 0,
             ..crate::verified()
         },
-        platform.clone(),
+        crate::with_trace(Arc::new(InlinePlatform), &TRACE),
     );
     let _kept = heap.mutate(|cx| Persistent::new(cx, node(cx, 1, None)));
     let _marker = heap.start_marking(Arc::new(Engine::default()));
-    platform.0.lock().unwrap().clear();
+    TRACE.clear();
     heap.advance_marking(false, STEP);
     heap.advance_marking(true, Duration::MAX);
     assert_eq!(
-        *platform.0.lock().unwrap(),
+        TRACE.names(),
         ["begin Gc.Step", "end", "begin Gc.Mark", "end"]
     );
     heap.finish_marking();

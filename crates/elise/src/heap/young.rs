@@ -34,7 +34,7 @@ use super::{
 };
 use crate::cage::Cage;
 use crate::page::{self, MarkTable, PAGE_BYTES, SlotSet};
-use crate::platform::{Job, JobDelegate, Phase, Platform, in_worker_span};
+use crate::platform::{Job, JobDelegate, Platform, Tracer};
 use crate::site::{self, ScavengeCounts};
 use crate::sync::{self, AtomicUsize, Mutex, Ordering};
 use crate::types::{self, Kind};
@@ -464,7 +464,7 @@ impl Inner {
         promote_all: bool,
     ) -> ScavengeRecord {
         let started = Instant::now();
-        let phase_scavenge = Phase::begin(self.tracing, platform, "Gc.Scavenge");
+        let phase_scavenge = self.tracer.phase("Gc.Scavenge");
         self.close_young_page();
         let seen = self.young_used.get();
         let young = self.young.get_mut();
@@ -505,8 +505,7 @@ impl Inner {
         seed.extend(items.drain(items.len().saturating_sub(items.len() % SEGMENT)..));
         let job = Scavenging {
             base: Base(self.cage.base()),
-            platform,
-            tracing: self.tracing,
+            tracer: self.tracer,
             black: self.marking_active.get(),
             from: &from,
             promote_all,
@@ -778,10 +777,8 @@ impl Inner {
 /// A scavenge, shared by the threads that do it.
 struct Scavenging<'a> {
     base: Base,
-    /// The heap's platform: a run on a worker is a phase of its trace,
-    /// while it records (`tracing`).
-    platform: &'a dyn Platform,
-    tracing: &'static std::sync::atomic::AtomicBool,
+    /// The heap's trace: a run on a worker is a phase of it.
+    tracer: Tracer,
     /// A concurrent marking runs: the old ranges its threads take are
     /// black, and their rest cleared when given back.
     black: bool,
@@ -890,12 +887,8 @@ impl Copier {
 
 impl Job for Scavenging<'_> {
     fn run(&self, delegate: &dyn JobDelegate) {
-        in_worker_span(
-            self.tracing,
-            self.platform,
-            delegate,
-            "Gc.ParallelScavenge",
-            || {
+        self.tracer
+            .in_worker_span(delegate, "Gc.ParallelScavenge", || {
                 let joining = delegate.is_joining_thread();
                 let mut copier = Copier::new(self.sites);
                 let mut scanned = 0usize;
@@ -917,8 +910,7 @@ impl Job for Scavenging<'_> {
                         .fetch_add(scanned, Ordering::Relaxed);
                 }
                 sync::lock(&self.copiers).push(copier);
-            },
-        )
+            })
     }
 
     fn max_concurrency(&self, active: usize) -> usize {

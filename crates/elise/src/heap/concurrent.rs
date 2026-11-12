@@ -31,7 +31,7 @@ use std::time::Instant;
 use super::{Base, SiteTally};
 use crate::js::{JsEdge, JsEdgeLocal, JsEdgeSink};
 use crate::page::{HEADER_BYTES, MarkTable};
-use crate::platform::{Job, JobDelegate, JobHandle, Platform, in_worker_span};
+use crate::platform::{Job, JobDelegate, JobHandle, Platform, Tracer};
 use crate::site;
 use crate::sync::{self, AtomicBool, AtomicUsize, Mutex, Ordering};
 use crate::types::{self, Kind};
@@ -66,10 +66,8 @@ pub(crate) struct Marker {
     /// It counts the bytes it scans (`marked_bytes`): a marking a JS engine
     /// drives, which tells the engine the heap's live bytes as it ends.
     counts_bytes: bool,
-    /// The heap's platform: a run on a worker is a phase of its trace,
-    /// while it records (`tracing`).
-    platform: Arc<dyn Platform>,
-    tracing: &'static std::sync::atomic::AtomicBool,
+    /// The heap's trace: a run on a worker is a phase of it.
+    tracer: Tracer,
     /// The bytes of the objects scanned (their slots'), in a marking that
     /// counts them; with the black allocated, the live old generation.
     pub(super) marked_bytes: AtomicUsize,
@@ -115,12 +113,11 @@ impl Marker {
         sites: usize,
         js: Option<Arc<dyn JsEdgeSink>>,
         verifies: bool,
-        platform: Arc<dyn Platform>,
+        tracer: Tracer,
     ) -> Self {
         let counts_bytes = js.is_some();
         Self {
-            tracing: platform.tracing(),
-            platform,
+            tracer,
             base,
             marks,
             young_pages,
@@ -527,12 +524,8 @@ unsafe fn load_edge(at: *const u8) -> u32 {
 
 impl Job for Marker {
     fn run(&self, delegate: &dyn JobDelegate) {
-        in_worker_span(
-            self.tracing,
-            &*self.platform,
-            delegate,
-            "Gc.ConcurrentMark",
-            || {
+        self.tracer
+            .in_worker_span(delegate, "Gc.ConcurrentMark", || {
                 let joining = delegate.is_joining_thread();
                 let mut scanned = 0usize;
                 // A background run counts its objects every `PROGRESS` as it goes,
@@ -638,8 +631,7 @@ impl Job for Marker {
                     scanned
                 };
                 self.count_scanned(left, !joining);
-            },
-        )
+            })
     }
 
     fn max_concurrency(&self, active: usize) -> usize {

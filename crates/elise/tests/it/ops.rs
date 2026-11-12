@@ -970,6 +970,18 @@ pub fn run(bytes: &[u8]) {
     drop(weak_roots);
     drop(ids);
     drop(heap);
+    // The heap cancelled each job it posted, as the job ended or as the
+    // heap went: none is left with the platform.
+    if let Some(steps) = &steps {
+        let left: Vec<usize> = steps
+            .posted
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|&(number, _)| number)
+            .collect();
+        assert!(left.is_empty(), "jobs {left:?} left posted");
+    }
     let mut finalized = log.borrow().clone();
     finalized.extend(sent.lock().unwrap().iter());
     finalized.sort_unstable();

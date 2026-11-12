@@ -36,57 +36,121 @@ pub trait Platform: Send + Sync {
         false
     }
 
-    /// A phase of a GC starts (`Gc.Pause`, `Gc.Mark`, `Gc.Sweep`,
-    /// `Gc.Finalize`; cppgc's `TracingController`): for the embedder's
-    /// trace, if it keeps one. Nothing by default. On a worker, a job's run
-    /// is one too (`Gc.ConcurrentMark`, `Gc.ConcurrentSweep`,
-    /// `Gc.ParallelScavenge`, `Gc.Discard`), as cppgc traces its concurrent
-    /// marking and sweeping: called from the worker, as `trace_end` is.
-    fn trace_begin(&self, name: &'static str) {
-        let _ = name;
-    }
-
-    /// The phase begun last ends.
-    fn trace_end(&self) {}
-
-    /// Whether the embedder's trace records now: a flag the heap reads
-    /// (relaxed) before each `trace_begin`, which it calls only while it is
-    /// set, so that a phase costs a load and a branch with no trace (cppgc's
-    /// `TracingController::GetCategoryGroupEnabled`, a pointer its trace
-    /// macros read). Asked once, as a heap is made. Never set by default: a
-    /// platform that takes `trace_begin` gives its own.
-    fn tracing(&self) -> &'static std::sync::atomic::AtomicBool {
-        &NOT_TRACING
+    /// The embedder's trace, if it keeps one (cppgc's
+    /// `Platform::GetTracingController`): asked once, as a heap is made.
+    /// None by default.
+    fn tracing_controller(&self) -> &'static dyn TracingController {
+        &NoTracing
     }
 }
 
-/// What `Platform::tracing` gives a platform with no trace.
+/// The embedder's trace (cppgc's `TracingController`): the GC's phases
+/// (`Gc.Pause`, `Gc.Mark`, `Gc.Sweep`, `Gc.Finalize`) begin and end in it,
+/// and so does a job's run on a worker (`Gc.ConcurrentMark`,
+/// `Gc.ConcurrentSweep`, `Gc.ParallelScavenge`, `Gc.Discard`), as cppgc
+/// traces its concurrent marking and sweeping. `'static`, as Chromium's
+/// `TraceLog` and the category flags its trace macros read: a job that
+/// traces holds it, and owns nothing of its platform's by it (the platform
+/// owns the job it runs, which may outlive the heap).
+pub trait TracingController: Sync {
+    /// Whether the trace records now: a flag the heap reads (relaxed)
+    /// before each `begin`, which it calls only while it is set, so that a
+    /// phase costs a load and a branch with no trace (cppgc's
+    /// `GetCategoryGroupEnabled`, a pointer its trace macros read). Asked
+    /// once, as a heap is made.
+    fn enabled(&self) -> &std::sync::atomic::AtomicBool;
+
+    /// A phase named `name` begins, on the calling thread.
+    fn begin(&self, name: &'static str);
+
+    /// The phase begun last on the calling thread ends.
+    fn end(&self);
+}
+
+/// `Platform::tracing_controller`'s default: a trace that never records.
+struct NoTracing;
+
+/// `NoTracing`'s flag, never set.
 static NOT_TRACING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// A phase of the embedder's trace, begun if it records (`tracing`, the
-/// platform's flag): `end` ends it if it was begun, whatever the flag says
-/// by then, so the begins and ends pair.
-#[must_use = "a phase ends with `end`"]
-pub(crate) struct Phase<'a>(Option<&'a dyn Platform>);
-
-impl<'a> Phase<'a> {
-    #[inline]
-    pub(crate) fn begin(
-        tracing: &std::sync::atomic::AtomicBool,
-        platform: &'a dyn Platform,
-        name: &'static str,
-    ) -> Self {
-        if !tracing.load(std::sync::atomic::Ordering::Relaxed) {
-            return Self(None);
-        }
-        platform.trace_begin(name);
-        Self(Some(platform))
+impl TracingController for NoTracing {
+    fn enabled(&self) -> &std::sync::atomic::AtomicBool {
+        &NOT_TRACING
     }
 
+    fn begin(&self, name: &'static str) {
+        let _ = name;
+    }
+
+    fn end(&self) {}
+}
+
+/// A heap's trace: its platform's `TracingController`, with the flag it
+/// gave (read before each phase without a virtual call).
+#[derive(Clone, Copy)]
+pub(crate) struct Tracer {
+    enabled: &'static std::sync::atomic::AtomicBool,
+    controller: &'static dyn TracingController,
+}
+
+impl Tracer {
+    /// `platform`'s trace.
+    pub(crate) fn of(platform: &dyn Platform) -> Self {
+        let controller = platform.tracing_controller();
+        Self {
+            enabled: controller.enabled(),
+            controller,
+        }
+    }
+
+    /// The trace records now.
+    #[inline]
+    fn records(self) -> bool {
+        self.enabled.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// A phase named `name`, begun if the trace records.
+    #[inline]
+    pub(crate) fn phase(self, name: &'static str) -> Phase {
+        if !self.records() {
+            return Phase(None);
+        }
+        self.controller.begin(name);
+        Phase(Some(self.controller))
+    }
+
+    /// `run`, a job's run, as a phase named `name` on a worker, if the
+    /// trace records (cppgc's `StatsCollector::EnabledConcurrentScope`,
+    /// which traces `CppGC.ConcurrentMark` and the like): begun before it,
+    /// ended after it, a panicking run's too. Nothing on the joining thread:
+    /// the phase it runs in (`Gc.Mark`, `Gc.Sweep`, `Gc.Scavenge`) is its
+    /// span already.
+    pub(crate) fn in_worker_span<R>(
+        self,
+        delegate: &dyn JobDelegate,
+        name: &'static str,
+        run: impl FnOnce() -> R,
+    ) -> R {
+        let _span = if self.records() && !delegate.is_joining_thread() {
+            self.controller.begin(name);
+            WorkerSpan(Some(self.controller))
+        } else {
+            WorkerSpan(None)
+        };
+        run()
+    }
+}
+
+/// A phase of the trace (`Tracer::phase`): `end` ends it if it was begun,
+/// whatever the flag says by then, so the begins and ends pair.
+#[must_use = "a phase ends with `end`"]
+pub(crate) struct Phase(Option<&'static dyn TracingController>);
+
+impl Phase {
     #[inline]
     pub(crate) fn end(self) {
-        if let Some(platform) = self.0 {
-            platform.trace_end();
+        if let Some(controller) = self.0 {
+            controller.end();
         }
     }
 }
@@ -129,45 +193,13 @@ pub trait JobHandle: Send {
     fn cancel(&self);
 }
 
-/// `run`, a job's run, as a phase of the embedder's trace named `name` on a
-/// worker, if the trace records (`tracing`; cppgc's
-/// `StatsCollector::EnabledConcurrentScope`, which traces
-/// `CppGC.ConcurrentMark` and the like): begun before it, ended after it,
-/// a panicking run's too. Nothing on the joining thread: the phase it runs
-/// in (`Gc.Mark`, `Gc.Sweep`, `Gc.Scavenge`) is its span already.
-pub(crate) fn in_worker_span<R>(
-    tracing: &std::sync::atomic::AtomicBool,
-    platform: &dyn Platform,
-    delegate: &dyn JobDelegate,
-    name: &'static str,
-    run: impl FnOnce() -> R,
-) -> R {
-    let _span = WorkerSpan::begin(tracing, platform, delegate, name);
-    run()
-}
+/// `Tracer::in_worker_span`'s span: ended as it drops.
+struct WorkerSpan(Option<&'static dyn TracingController>);
 
-/// `in_worker_span`'s span: ended as it drops.
-struct WorkerSpan<'a>(Option<&'a dyn Platform>);
-
-impl<'a> WorkerSpan<'a> {
-    fn begin(
-        tracing: &std::sync::atomic::AtomicBool,
-        platform: &'a dyn Platform,
-        delegate: &dyn JobDelegate,
-        name: &'static str,
-    ) -> Self {
-        if !tracing.load(std::sync::atomic::Ordering::Relaxed) || delegate.is_joining_thread() {
-            return Self(None);
-        }
-        platform.trace_begin(name);
-        Self(Some(platform))
-    }
-}
-
-impl Drop for WorkerSpan<'_> {
+impl Drop for WorkerSpan {
     fn drop(&mut self) {
-        if let Some(platform) = self.0 {
-            platform.trace_end();
+        if let Some(controller) = self.0 {
+            controller.end();
         }
     }
 }

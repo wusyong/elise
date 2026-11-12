@@ -78,7 +78,9 @@ pub use js::{
 };
 pub use member::{Erased, Member, WeakMember};
 pub use persistent::{Persistent, WeakPersistent};
-pub use platform::{InlinePlatform, Job, JobDelegate, JobHandle, Platform, ThreadPool};
+pub use platform::{
+    InlinePlatform, Job, JobDelegate, JobHandle, Platform, ThreadPool, TracingController,
+};
 pub use site::{MAX_SITES, PretenureDecision, Site, SiteStats};
 pub use token::{LocalToken, TokenCell};
 pub use types::{FieldInfo, FieldKind, MAX_TYPES, TypeInfo, TypeSlot};

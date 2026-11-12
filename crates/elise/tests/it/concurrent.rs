@@ -20,15 +20,14 @@ use elise::{
     ThreadPool,
 };
 
+use crate::{Recorder, with_trace};
+
 /// A platform whose posted jobs (a marking's, the discarding of pages)
-/// run only in `step`; it keeps the trace events it is sent.
+/// run only in `step`.
 #[derive(Default)]
 pub(crate) struct Stepping {
     /// By the number each was posted with.
     posted: Mutex<Vec<(usize, Arc<dyn Job + Send>)>>,
-    /// The trace's events, `begin <name>` and `end`, and when each was.
-    pub(crate) traced: Mutex<Vec<String>>,
-    pub(crate) traced_at: Mutex<Vec<std::time::Instant>>,
     next: Mutex<usize>,
     /// The times the heap told a posted job's handle there is more to do.
     notified: AtomicUsize,
@@ -121,28 +120,6 @@ impl Platform for Steps {
     fn posts_jobs(&self) -> bool {
         true
     }
-
-    fn tracing(&self) -> &'static std::sync::atomic::AtomicBool {
-        &crate::TRACING
-    }
-
-    fn trace_begin(&self, name: &'static str) {
-        self.0.traced.lock().unwrap().push(format!("begin {name}"));
-        self.0
-            .traced_at
-            .lock()
-            .unwrap()
-            .push(std::time::Instant::now());
-    }
-
-    fn trace_end(&self) {
-        self.0.traced.lock().unwrap().push("end".to_owned());
-        self.0
-            .traced_at
-            .lock()
-            .unwrap()
-            .push(std::time::Instant::now());
-    }
 }
 
 #[derive(GcObject)]
@@ -155,12 +132,30 @@ struct Node {
 /// 32 KiB, finished in the pause past 96 KiB: the limit's half beyond),
 /// with a nursery of `nursery_bytes`.
 pub(crate) fn stepping_heap(nursery_bytes: usize) -> (Heap, Arc<Stepping>) {
-    stepping_heap_with(HeapOptions {
+    stepping_heap_with(stepping_options(nursery_bytes))
+}
+
+/// `stepping_heap`'s options.
+fn stepping_options(nursery_bytes: usize) -> HeapOptions {
+    HeapOptions {
         min_allocation_bytes: 64 << 10,
         min_overshoot_bytes: 0,
         nursery_bytes,
         ..crate::verified()
-    })
+    }
+}
+
+/// A `stepping_heap` whose trace is `trace`.
+pub(crate) fn traced_stepping_heap(
+    nursery_bytes: usize,
+    trace: &'static Recorder,
+) -> (Heap, Arc<Stepping>) {
+    let (platform, steps) = stepping_platform();
+    let platform = with_trace(platform, trace);
+    (
+        Heap::with_platform(stepping_options(nursery_bytes), platform),
+        steps,
+    )
 }
 
 pub(crate) fn stepping_heap_with(options: HeapOptions) -> (Heap, Arc<Stepping>) {
@@ -399,21 +394,18 @@ fn the_margin_is_at_most_half_of_the_cage_left() {
 /// Once the job found nothing left, the next safepoint finishes.
 #[test]
 fn a_marking_finishes_at_the_safepoint_after_it_is_done() {
-    let (mut heap, steps) = stepping_heap(0);
+    static TRACE: Recorder = Recorder::new(true);
+    let (mut heap, steps) = traced_stepping_heap(0, &TRACE);
     let a = old_pair(&mut heap);
     start_marking(&mut heap);
     assert!(!heap.should_collect() || heap.stats().young_bytes > 0);
-    steps.traced.lock().unwrap().clear();
-    steps.traced_at.lock().unwrap().clear();
+    TRACE.clear();
     steps.step();
     // The worker's run is a span of the trace, which holds the time it
     // counts (`background_mark_ns`, below).
-    assert_eq!(
-        *steps.traced.lock().unwrap(),
-        ["begin Gc.ConcurrentMark", "end"]
-    );
+    assert_eq!(TRACE.names(), ["begin Gc.ConcurrentMark", "end"]);
     let span = {
-        let at = steps.traced_at.lock().unwrap();
+        let at = TRACE.times();
         u64::try_from(at[1].duration_since(at[0]).as_nanos()).unwrap()
     };
     assert!(heap.should_collect(), "done: the next safepoint finishes");
