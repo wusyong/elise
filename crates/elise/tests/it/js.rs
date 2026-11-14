@@ -337,6 +337,39 @@ fn an_object_read_back_from_the_engine_while_marking_is_marked() {
     heap.mutate(|cx| assert_eq!(holder.get(cx).next.get(cx).unwrap().value.get(), 9));
 }
 
+/// An object only the engine's wrapper holds leads to another as it is
+/// handed over; its edge to that one is then cleared. The other stays
+/// marked, as the barrier (SATB) keeps what an edge held when the marking
+/// reached its object: garbage that floats till the next marking. The
+/// verifier takes it as such, though the roots never reached it (the
+/// snapshot hasn't it) and the handed object no longer leads to it as the
+/// marking ends.
+#[test]
+fn what_a_handed_object_led_to_floats_once_its_edge_is_cleared() {
+    let (mut heap, steps) = driven(0);
+    let (held, child_id) = heap.mutate(|cx| {
+        let child = node(cx, 2, None);
+        let parent = node(cx, 1, Some(child));
+        (Held::of(cx, parent), cx.new_id(child))
+    });
+    let marker = heap.start_marking(Arc::new(Engine::default()));
+    hand(&marker, vec![held]);
+    // The marker goes through the handed object, to its child.
+    steps.step();
+    heap.mutate(|cx| held.get(cx).next.set(cx, None));
+    // The verifier runs as the marking ends.
+    finish(&mut heap);
+    heap.mutate(|cx| {
+        assert!(held.get(cx).next.get(cx).is_none());
+        assert!(cx.by_id::<Node>(child_id).is_some(), "it floats");
+    });
+    // The next marking frees it.
+    let marker = heap.start_marking(Arc::new(Engine::default()));
+    hand(&marker, vec![held]);
+    finish(&mut heap);
+    heap.mutate(|cx| assert!(cx.by_id::<Node>(child_id).is_none()));
+}
+
 /// Scavenges keep what only the engine holds (old), and the young objects
 /// it points to.
 #[test]

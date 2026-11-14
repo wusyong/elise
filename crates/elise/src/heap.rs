@@ -2388,9 +2388,29 @@ impl Inner {
         }
     }
 
+    /// Under the verifier, what an edge's old value reaches as it is
+    /// overwritten while marking runs: it may float, marked already or
+    /// not. The snapshot has it if the roots reached it then; not if only
+    /// an object the engine handed over did (its wrapper's, which the
+    /// roots don't hold): the marker reached it through that object, and
+    /// by the marking's end the object no longer leads to it.
+    fn overwritten(&self, old: u32) {
+        let data = old as usize;
+        if old == 0 || self.is_young(data) {
+            return;
+        }
+        let reached = self.reachable_from(vec![data]);
+        if let Some(marking) = self.marking.borrow_mut().as_mut() {
+            marking.floats(reached);
+        }
+    }
+
     /// The barrier (SATB): `old`, an edge's value about to be overwritten
     /// while marking runs, is marked if it is old and wasn't, and pushed.
     pub(crate) fn satb(&self, old: u32) {
+        if self.verifies() {
+            self.overwritten(old);
+        }
         let old = old as usize;
         if old == 0 || self.is_young(old) || !self.mark_table.mark(old) {
             return;
