@@ -12,7 +12,7 @@
 | `Gc<'gc, T>` | `T*` | 操作裡的物件：raw pointer，帶著操作的 invariant lifetime，不能帶出操作 |
 | `Member<T>` | `Member<T>` | 物件裡的邊：cage 裡的 32 位元 offset，0 是 null。`[Member<T>; N]` 也可以當欄位：N 條連續的邊 |
 | `Erased` | `Member<GarbageCollectedMixin>` 這類指向多種型別的邊 | 任何型別的物件：`Member<Erased>` 的邊可以指向不同型別的物件，`Gc::erase` 把 `Gc<T>` 換成它；沒有欄位。`Gc::<Erased>::downcast::<T>` 照物件 header 的型別轉回去，不是 `T` 是 `None`（DOM 的節點的「種類的資料」一格指向幾種型別） |
-| `Persistent<T>` | `Persistent<T>` | root：heap 的 root 表的一格，可以留過操作 |
+| `Persistent<T>` | `Persistent<T>` | root：heap 的 root 表的一格，可以留過操作。`roots_made()` 是這個 thread 到現在建了幾個（連同 clone 的），只在開了 `census` feature 時數（沒開時是 0，不留計數）：給 embedder 數它的每次呼叫登記幾個 root |
 | `WeakMember<T>` | `WeakMember<T>` | weak 的邊：不留住它指的物件，物件死了之後 GC 把它清成 0（old 的物件由 full GC，young 的由 scavenge）。`get(cx)` 回 `Option<Gc>`，`set`；`[WeakMember<T>; N]` 也可以當欄位 |
 | `Id` | Blink 的 `DOMNodeId` | heap 的 id 表裡的編號：`new_id` 給，一直往上數、不重複；物件活著時 `by_id` 找得到，死了之後永遠找不到（`from_raw` 從寫下的數字讀回來，任何數字都安全）。`HeapStats::id_chunks` 是表現在的塊數 |
 | `EphemeronPair<K, V>` | `EphemeronPair<K, V>` | ephemeron：一條 weak 的 key 和一條 value，value 只在 key 活著時活著（value 指回 key 不會留住 key）。`key(cx)`、`value(cx)`（key 死了兩個都是 `None`）、`set(cx, key, value)`；`[EphemeronPair<K, V>; N]` 也可以當欄位。會長大的容器（像 Oilpan 的 weak key 的 `HeapHashMap`）之後照需要建在它上面 |

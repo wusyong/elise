@@ -20,6 +20,11 @@ workspace = true
 [package.metadata.verus]
 verify = true
 
+[features]
+# Counts the roots made (`roots_made`): for a host's census of what its
+# calls cost. Off, the count isn't kept.
+census = []
+
 [dependencies]
 elise-derive.workspace = true
 # Verus's `verus!` and its specs, erased in a plain build: `src/bits.rs` is

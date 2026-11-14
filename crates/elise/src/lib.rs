@@ -77,7 +77,7 @@ pub use js::{
     JsEdge, JsEdgeLocal, JsEdgeSink, WrapperLocal, WrapperMarker, js_edges_of, type_index,
 };
 pub use member::{Erased, Member, WeakMember};
-pub use persistent::{Persistent, WeakPersistent};
+pub use persistent::{Persistent, WeakPersistent, roots_made};
 pub use platform::{
     InlinePlatform, Job, JobDelegate, JobHandle, Platform, ThreadPool, TracingController,
 };

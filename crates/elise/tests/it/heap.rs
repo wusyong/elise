@@ -980,3 +980,22 @@ fn a_trace_that_stops_in_a_phase_has_its_phases_ended() {
         ]
     );
 }
+
+/// The census counts a thread's roots, their clones too, and nothing
+/// without its feature.
+#[test]
+fn the_census_counts_the_roots_made() {
+    let mut heap = old_heap();
+    let before = elise::roots_made();
+    let root = heap.mutate(|cx| {
+        let kept = cx.alloc(SmallInit {
+            value: Cell::new(1),
+        });
+        Persistent::new(cx, kept)
+    });
+    let clone = root.clone();
+    let made = elise::roots_made() - before;
+    assert_eq!(made, if cfg!(feature = "census") { 2 } else { 0 });
+    drop((root, clone));
+    assert_eq!(elise::roots_made() - before, made, "a drop isn't counted");
+}

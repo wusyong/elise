@@ -6,6 +6,21 @@ use std::ptr::NonNull;
 use crate::member::compress;
 use crate::{Gc, HeapType, Mutation};
 
+#[cfg(feature = "census")]
+thread_local! {
+    static ROOTS_MADE: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// How many roots (`Persistent`s, their clones too) this thread made so
+/// far, counted with the `census` feature alone: zero without it. For a
+/// host counting what each of its calls registers.
+pub fn roots_made() -> u64 {
+    #[cfg(feature = "census")]
+    return ROOTS_MADE.with(std::cell::Cell::get);
+    #[cfg(not(feature = "census"))]
+    0
+}
+
 /// A root (cppgc's `Persistent`, its node in Blink's `PersistentRegion`):
 /// an entry of its heap's root table, which keeps the object alive. It
 /// may outlive an operation, not the heap: it holds the table by address,
@@ -27,6 +42,8 @@ impl<T: HeapType> Persistent<T> {
     }
 
     fn of(table: NonNull<RootTable>, offset: u32) -> Self {
+        #[cfg(feature = "census")]
+        ROOTS_MADE.with(|made| made.set(made.get().wrapping_add(1)));
         // SAFETY: the heap's table, which lives as long as its roots do
         // (`Heap`'s drop leaks it while any is left).
         let index = unsafe { table.as_ref() }.add(offset);
