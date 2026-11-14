@@ -5,7 +5,7 @@ members = ["crates/*"]
 exclude = ["crates/elise/fuzz"]
 
 [workspace.package]
-version = "0.2.1"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.99"
 license = "MIT OR Apache-2.0"
@@ -14,10 +14,10 @@ keywords = ["gc", "garbage-collector", "dom", "memory"]
 categories = ["memory-management"]
 
 [workspace.dependencies]
-elise = { path = "crates/elise", version = "0.2.1" }
+elise = { path = "crates/elise", version = "0.3.0" }
 # Pinned exactly: the derive's output names `elise`'s internals (`TypeSlot`,
 # `__init`), so the two are released together.
-elise-derive = { path = "crates/elise-derive", version = "=0.2.1" }
+elise-derive = { path = "crates/elise-derive", version = "=0.3.0" }
 
 # Reserving the cage and committing its pages (each crate adds the
 # features it uses).
