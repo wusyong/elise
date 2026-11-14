@@ -141,6 +141,8 @@ The documents in `docs/` are written in Traditional Chinese:
   and what to review when changing the code.
 - [testing.md](docs/testing.md): every kind of test, what each covers and
   how to run it.
+- [benchmark.md](docs/benchmark.md): measurements against cppgc, V8's GC and
+  Chrome's Oilpan, taken in machopo.
 - [contributing.md](docs/contributing.md): the repo's rules (`unsafe`,
   integer overflow, tests, line endings) and how elise stays in sync with
   machopo.
